@@ -12,7 +12,7 @@
 #include <iostream>
 #include <memory> //shared_ptr
 #include <mutex>
-#include <mysql.h>
+#include <libpq-fe.h>
 #include <prettywriter.h>
 #include <random>
 #include <sstream>
@@ -70,6 +70,7 @@ public:
   std::string definition();
   /* return random value of that column */
   virtual std::string rand_value();
+  std::string type_clause() { return clause(); }
   /* return string to call type */
   static const std::string col_type_to_string(COLUMN_TYPES type);
   /* return column type from a string */
@@ -149,7 +150,7 @@ struct Index {
 
 struct Thd1 {
   Thd1(int id, std::ofstream &tl, std::ofstream &ddl_l, std::ofstream &client_l,
-       MYSQL *c, std::atomic<unsigned long long> &p,
+       PGconn *c, std::atomic<unsigned long long> &p,
        std::atomic<unsigned long long> &f)
       : thread_id(id), thread_log(tl), ddl_logs(ddl_l), client_log(client_l),
         conn(c), performed_queries_total(p), failed_queries_total(f){};
@@ -162,10 +163,10 @@ struct Thd1 {
   std::ofstream &thread_log;
   std::ofstream &ddl_logs;
   std::ofstream &client_log;
-  MYSQL *conn;
+  PGconn *conn;
   std::atomic<unsigned long long> &performed_queries_total;
   std::atomic<unsigned long long> &failed_queries_total;
-  std::shared_ptr<MYSQL_RES> result; // result set of sql
+  std::shared_ptr<PGresult> result; // result set of sql
   bool ddl_query = false;     // is the query ddl
   bool success = false;       // if the sql is successfully executed
   int max_con_fail_count = 0; // consecutive failed queries
@@ -223,12 +224,12 @@ struct Table {
   virtual ~Table();
 
   std::string name_;
-  std::string engine;
-  std::string row_format;
-  std::string tablespace;
-  std::string compression;
-  std::string encryption = "N";
-  int key_block_size = 0;
+  std::string storage_engine;
+  std::string storage_layout;
+  std::string storage_tablespace;
+  std::string storage_compression;
+  std::string storage_encryption = "N";
+  int storage_block_size = 0;
   int number_of_initial_records;
   size_t auto_inc_index;
   // std::string data_directory; todo add corressponding code

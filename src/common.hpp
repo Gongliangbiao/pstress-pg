@@ -12,7 +12,7 @@
 #endif
 
 #ifndef FORK
-#define FORK "MySQL"
+#define FORK "PostgreSQL"
 #endif
 
 #ifndef PQREVISION

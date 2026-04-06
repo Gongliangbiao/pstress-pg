@@ -5,6 +5,13 @@
 #include <cstring>
 #include <iostream>
 
+static std::string pq_client_version_string() {
+  const int version = PQlibVersion();
+  return std::to_string(version / 10000) + "." +
+         std::to_string((version / 100) % 100) + "." +
+         std::to_string(version % 100);
+}
+
 Node::Node() {
   workers.clear();
   performed_queries_total = 0;
@@ -42,7 +49,7 @@ bool Node::createGeneralLog() {
   }
   general_log.open(logName, std::ios::out | std::ios::trunc);
   general_log << "- PStress v" << PQVERSION << "-" << PQREVISION
-              << " compiled with " << FORK << "-" << mysql_get_client_info()
+              << " compiled with " << FORK << "-" << pq_client_version_string()
               << std::endl;
 
   if (!general_log.is_open()) {
@@ -124,61 +131,45 @@ int Node::startWork() {
 }
 
 void Node::tryConnect() {
-  MYSQL *conn;
-  conn = mysql_init(NULL);
-  if (conn == NULL) {
-    std::cerr << "Error " << mysql_errno(conn) << ": " << mysql_error(conn)
-              << std::endl;
-    std::cerr << "* PSTRESS: Unable to continue [1], exiting" << std::endl;
-    general_log << "Error " << mysql_errno(conn) << ": " << mysql_error(conn)
-                << std::endl;
-    general_log << "* PSTRESS: Unable to continue [1], exiting" << std::endl;
-    mysql_close(conn);
-    mysql_library_end();
-    exit(EXIT_FAILURE);
-  }
-  if (mysql_real_connect(conn, myParams.address.c_str(),
-                         myParams.username.c_str(), myParams.password.c_str(),
-                         options->at(Option::DATABASE)->getString().c_str(),
-                         myParams.port, myParams.socket.c_str(), 0) == NULL) {
-    std::cerr << "Error " << mysql_errno(conn) << ": " << mysql_error(conn)
-              << std::endl;
-    std::cerr << "* PSTRESS: Unable to continue [2], exiting" << std::endl;
-    general_log << "Error " << mysql_errno(conn) << ": " << mysql_error(conn)
-                << std::endl;
-    general_log << "* PSTRESS: Unable to continue [2], exiting" << std::endl;
-    mysql_close(conn);
-    mysql_library_end();
-    exit(EXIT_FAILURE);
-  }
-  general_log << "- Connected to " << mysql_get_host_info(conn) << "..."
-              << std::endl;
-  // getting the real server version
-  MYSQL_RES *result = NULL;
-  std::string server_version;
-
-  if (!mysql_query(conn, "select @@version_comment limit 1") &&
-      (result = mysql_use_result(conn))) {
-    MYSQL_ROW row = mysql_fetch_row(result);
-    if (row && row[0]) {
-      server_version = mysql_get_server_info(conn);
-      server_version.append(" ");
-      server_version.append(row[0]);
+  const std::string host = myParams.socket.empty() ? myParams.address
+                                                   : myParams.socket;
+  const std::string port = std::to_string(myParams.port);
+  PGconn *conn = PQsetdbLogin(host.c_str(), port.c_str(), nullptr, nullptr,
+                              options->at(Option::DATABASE)->getString().c_str(),
+                              myParams.username.c_str(),
+                              myParams.password.c_str());
+  if (conn == nullptr || PQstatus(conn) != CONNECTION_OK) {
+    const char *error =
+        conn ? PQerrorMessage(conn) : "PQconnectdb returned null";
+    std::cerr << "Error: " << error << std::endl;
+    std::cerr << "* PSTRESS: Unable to continue, exiting" << std::endl;
+    general_log << "Error: " << error << std::endl;
+    general_log << "* PSTRESS: Unable to continue, exiting" << std::endl;
+    if (conn != nullptr) {
+      PQfinish(conn);
     }
-  } else {
-    server_version = mysql_get_server_info(conn);
+    exit(EXIT_FAILURE);
+  }
+  general_log << "- Connected to " << PQhost(conn) << ":" << PQport(conn)
+              << std::endl;
+  std::string server_version = PQparameterStatus(conn, "server_version")
+                                   ? PQparameterStatus(conn, "server_version")
+                                   : "";
+  PGresult *result = PQexec(conn, "select version()");
+  if (result != nullptr && PQresultStatus(result) == PGRES_TUPLES_OK &&
+      PQntuples(result) > 0 && PQnfields(result) > 0 &&
+      !PQgetisnull(result, 0, 0)) {
+    server_version = PQgetvalue(result, 0, 0);
   }
   general_log << "- Connected server version: " << server_version << std::endl;
   if (strcmp(PLATFORM_ID,"Darwin") == 0)
     general_log << "- Table compression is disabled as hole punching is not supported on OSX"
                 << std::endl;
   if (result != NULL) {
-    mysql_free_result(result);
+    PQclear(result);
   }
-  mysql_close(conn);
-  mysql_thread_end();
+  PQfinish(conn);
   if (options->at(Option::TEST_CONNECTION)->getBool()) {
     exit(EXIT_SUCCESS);
   }
 }
-

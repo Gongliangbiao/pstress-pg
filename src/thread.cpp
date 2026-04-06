@@ -9,13 +9,6 @@
 std::atomic_flag lock_metadata = ATOMIC_FLAG_INIT;
 std::atomic<bool> metadata_loaded(false);
 
-inline unsigned long long Node::getAffectedRows(MYSQL *connection) {
-  if (mysql_affected_rows(connection) == ~(unsigned long long)0) {
-    return 0LL;
-  }
-  return mysql_affected_rows(connection);
-}
-
 void Node::workerThread(int number) {
 
   std::ofstream thread_log;
@@ -53,37 +46,24 @@ void Node::workerThread(int number) {
     std::cout << std::fixed;
   }
 
-  MYSQL *conn;
-
-  conn = mysql_init(NULL);
-  if (conn == NULL) {
-    thread_log << "Error " << mysql_errno(conn) << ": " << mysql_error(conn)
+  const std::string host = myParams.socket.empty() ? myParams.address
+                                                   : myParams.socket;
+  const std::string port = std::to_string(myParams.port);
+  PGconn *conn = PQsetdbLogin(host.c_str(), port.c_str(), nullptr, nullptr,
+                              myParams.database.c_str(),
+                              myParams.username.c_str(),
+                              myParams.password.c_str());
+  if (conn == nullptr || PQstatus(conn) != CONNECTION_OK) {
+    thread_log << "Error: "
+               << (conn ? PQerrorMessage(conn) : "PQconnectdb returned null")
                << std::endl;
-
-    if (thread_log) {
-      thread_log.close();
+    if (conn != nullptr) {
+      PQfinish(conn);
     }
-    general_log << ": Thread #" << number << " is exiting abnormally"
-                << std::endl;
-    return;
-  }
-#ifdef MAXPACKET
-  if (myParams.maxpacket != MAX_PACKET_DEFAULT) {
-    mysql_options(conn, MYSQL_OPT_MAX_ALLOWED_PACKET, &myParams.maxpacket);
-  }
-#endif
-  if (mysql_real_connect(conn, myParams.address.c_str(),
-                         myParams.username.c_str(), myParams.password.c_str(),
-                         myParams.database.c_str(), myParams.port,
-                         myParams.socket.c_str(), 0) == NULL) {
-    thread_log << "Error " << mysql_errno(conn) << ": " << mysql_error(conn)
-               << std::endl;
-    mysql_close(conn);
 
     if (thread_log.is_open()) {
       thread_log.close();
     }
-    mysql_thread_end();
     return;
   }
 
@@ -159,6 +139,5 @@ void Node::workerThread(int number) {
   if (client_log.is_open())
     client_log.close();
 
-  mysql_close(conn);
-  mysql_thread_end();
+  PQfinish(conn);
 }

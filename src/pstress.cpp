@@ -17,10 +17,48 @@
 #include "pstress.hpp"
 #include "random_test.hpp"
 #include <INIReader.hpp>
-#include <mysql.h>
+#include <libpq-fe.h>
 #include <thread>
 #include <string>
 #include <libgen.h> //dirname() uses this
+
+static std::vector<std::string> normalize_legacy_option_aliases(int argc,
+                                                                char *argv[]) {
+  static const std::vector<std::pair<std::string, std::string>> aliases = {
+      {"--tbs-count", "--general-tablespace-count"},
+      {"--no-tbs", "--no-tablespace"},
+      {"--mso", "--server-option"},
+      {"--sof", "--server-option-file"},
+      {"--set-variable", "--set-server-variable"},
+      {"--undo-tbs-count", "--undo-tablespace-count"},
+      {"--undo-tbs-sql", "--undo-tablespace-sql"},
+      {"--no-virtual", "--no-generated-columns"},
+      {"--alter-table-encrypt", "--alter-table-encryption"},
+      {"--alter-table-compress", "--alter-table-compression"},
+      {"--alt-tbs-enc", "--alter-tablespace-encryption"},
+      {"--alt-discard-tbs", "--alter-discard-tablespace"},
+      {"--alt-db-enc", "--alter-database-encryption"},
+      {"--alt-tbs-rename", "--alter-tablespace-rename"},
+  };
+
+  std::vector<std::string> rewritten(argc);
+  for (int i = 1; i < argc; ++i) {
+    rewritten[i] = argv[i];
+    for (const auto &[legacy, current] : aliases) {
+      if (rewritten[i] == legacy) {
+        rewritten[i] = current;
+        break;
+      }
+      const auto prefix = legacy + "=";
+      if (rewritten[i].rfind(prefix, 0) == 0) {
+        rewritten[i] = current + rewritten[i].substr(legacy.size());
+        break;
+      }
+    }
+    argv[i] = rewritten[i].data();
+  }
+  return rewritten;
+}
 
 /* Global variable to hold pstress build directory path */
 const char *binary_fullpath;
@@ -34,7 +72,7 @@ void read_section_settings(struct workerParams *wParams, std::string secName,
   wParams->username = reader.Get(secName, "user", "test");
   wParams->password = reader.Get(secName, "password", "");
   wParams->database = reader.Get(secName, "database", "");
-  wParams->port = reader.GetInteger(secName, "port", 3306);
+  wParams->port = reader.GetInteger(secName, "port", 5432);
   wParams->threads = reader.GetInteger(secName, "threads", 10);
   wParams->queries_per_thread =
       reader.GetInteger(secName, "queries-per-thread", 10000);
@@ -62,6 +100,7 @@ int main(int argc, char *argv[]) {
   std::vector<std::thread> nodes;
   std::ios_base::sync_with_stdio(false);
   add_options();
+  auto normalized_args = normalize_legacy_option_aliases(argc, argv);
   int c;
   while (true) {
     struct option long_options[Option::MAX];
@@ -182,7 +221,6 @@ int main(int argc, char *argv[]) {
 
   save_metadata_to_file();
   clean_up_at_end();
-  mysql_library_end();
   delete_options();
   std::cout << "COMPLETED" << std::endl;
 

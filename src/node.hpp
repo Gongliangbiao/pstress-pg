@@ -6,7 +6,7 @@
 #include <atomic>
 #include <fstream>
 #include <iostream>
-#include <mysql.h>
+#include <libpq-fe.h>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -68,7 +68,6 @@ public:
 private:
   // declaration for worker thread function
   void workerThread(int);
-  inline unsigned long long getAffectedRows(MYSQL *);
   void tryConnect();
   bool createGeneralLog();
   void readSettings(std::string);

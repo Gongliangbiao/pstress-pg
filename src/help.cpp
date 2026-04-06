@@ -1,9 +1,17 @@
 #include "common.hpp"
 #include "pstress.hpp"
 #include <iostream>
+#include <libpq-fe.h>
 
 Opx *options = new Opx;
 Ser_Opx *server_options = new Ser_Opx;
+
+static std::string pq_client_version_string() {
+  const int version = PQlibVersion();
+  return std::to_string(version / 10000) + "." +
+         std::to_string((version / 100) % 100) + "." +
+         std::to_string(version % 100);
+}
 
 /* Process --mso=abc=30=40 to abc,{30,40}*/
 void add_server_options(std::string str) {
@@ -36,7 +44,7 @@ void add_server_options(std::string str) {
   so->values.push_back(str);
 }
 
-/* process file. and push to mysqld server options */
+/* process file. and push to server options */
 void add_server_options_file(std::string file_name) {
   std::ifstream f1;
   f1.open(file_name);
@@ -75,19 +83,19 @@ void add_options() {
 
   /* Number of General tablespaces */
   opt =
-      newOption(Option::INT, Option::NUMBER_OF_GENERAL_TABLESPACE, "tbs-count");
+      newOption(Option::INT, Option::NUMBER_OF_GENERAL_TABLESPACE, "general-tablespace-count");
   opt->setInt("1");
-  opt->help = "random number of different general tablespaces ";
+  opt->help = "maximum number of general tablespaces to model; ignored on PostgreSQL";
 
   /* Number of Undo tablespaces */
   opt =
-      newOption(Option::INT, Option::NUMBER_OF_UNDO_TABLESPACE, "undo-tbs-count");
+      newOption(Option::INT, Option::NUMBER_OF_UNDO_TABLESPACE, "undo-tablespace-count");
   opt->setInt("3");
-  opt->help = "Number of default undo tablespaces ";
+  opt->help = "number of undo tablespaces to model; MySQL-only";
 
   /* Engine */
   opt = newOption(Option::STRING, Option::ENGINE, "engine");
-  opt->help = "Engine used ";
+  opt->help = "storage engine to use when supported; ignored on PostgreSQL";
   opt->setString("INNODB");
 
   /* Just Load DDL*/
@@ -117,40 +125,40 @@ void add_options() {
   /* disable table compression */
   opt = newOption(Option::BOOL, Option::NO_TABLE_COMPRESSION,
                   "no-table-compression");
-  opt->help = "Disable table compression";
+  opt->help = "disable table-level compression features";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
   /* disable column compression */
   opt = newOption(Option::BOOL, Option::NO_COLUMN_COMPRESSION,
                   "no-column-compression");
-  opt->help = "Disable column compression. It is percona style compression";
+  opt->help = "disable column-level compression features; MySQL/Percona-only";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
   /* disable all type of encrytion */
   opt = newOption(Option::BOOL, Option::NO_ENCRYPTION, "no-encryption");
-  opt->help = "Disable All type of encrytion";
+  opt->help = "disable storage encryption features";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
   /* todo set default to all */
   opt = newOption(Option::STRING, Option::ENCRYPTION_TYPE, "encryption-type");
   opt->help =
-      "all ==> keyring/Y/N \n oracle ==> Y/N \n x ==> x \n if some string "
-      "other than all/oracle is given it would use it as encryption type";
+      "storage encryption mode selection. MySQL builds accept values such as "
+      "all, oracle, Y, N, KEYRING; PostgreSQL currently ignores this setting";
   opt->setString("oracle");
 
   /* create,alter,drop undo tablespace */
-  opt = newOption(Option::INT, Option::UNDO_SQL, "undo-tbs-sql");
-  opt->help = "Assign probability of running create/alter/drop undo tablespace";
+  opt = newOption(Option::INT, Option::UNDO_SQL, "undo-tablespace-sql");
+  opt->help = "probability of running create/alter/drop undo tablespace; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /* disable virtual columns*/
-  opt = newOption(Option::BOOL, Option::NO_VIRTUAL_COLUMNS, "no-virtual");
-  opt->help = "Disable virtual columns";
+  opt = newOption(Option::BOOL, Option::NO_VIRTUAL_COLUMNS, "no-generated-columns");
+  opt->help = "disable generated columns";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
@@ -161,8 +169,8 @@ void add_options() {
   opt->setArgs(no_argument);
 
   /* disable all type of encrytion */
-  opt = newOption(Option::BOOL, Option::NO_TABLESPACE, "no-tbs");
-  opt->help = "disable all type of tablespace including the general tablespace";
+  opt = newOption(Option::BOOL, Option::NO_TABLESPACE, "no-tablespace");
+  opt->help = "disable tablespace-specific features";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
@@ -180,16 +188,16 @@ void add_options() {
   opt = newOption(Option::STRING, Option::ALGORITHM, "alter-algorithm");
   opt->help = "algorithm used in alter table.\n"
               "--alter-algorithm INPLACE,COPY,DEFAULT\n --alter-algorithm all "
-              "means randomly one of them will be picked. Pass options comma "
-              "seperated without space";
+              "means randomly one of them will be picked. PostgreSQL ignores "
+              "this setting. Pass options comma separated without space";
   opt->setString("all");
 
   /* lock for alter */
   opt = newOption(Option::STRING, Option::LOCK, "alter-lock");
   opt->help = "lock mechanism used in alter table.\n "
               "--alter-lock DEFAULT,NONE,SHARED,EXCLUSIVE\n --alter-lock all "
-              "means randomly one of them will be picked. Pass options comma "
-              "seperated without space";
+              "means randomly one of them will be picked. PostgreSQL ignores "
+              "this setting. Pass options comma separated without space";
   opt->setString("all");
 
   /* Number of columns in a table */
@@ -291,8 +299,8 @@ void add_options() {
 
   /*Encrypt table */
   opt = newOption(Option::INT, Option::ALTER_TABLE_ENCRYPTION,
-                  "alter-table-encrypt");
-  opt->help = "Alter table set Encryption";
+                  "alter-table-encryption");
+  opt->help = "alter table storage encryption; MySQL-only";
   opt->setInt(10);
   opt->setSQL();
   opt->setDDL();
@@ -306,8 +314,8 @@ void add_options() {
 
   /*compress table */
   opt = newOption(Option::INT, Option::ALTER_TABLE_COMPRESSION,
-                  "alter-table-compress");
-  opt->help = "Alter table compression";
+                  "alter-table-compression");
+  opt->help = "alter table compression; MySQL-only";
   opt->setInt(10);
   opt->setSQL();
   opt->setDDL();
@@ -315,70 +323,66 @@ void add_options() {
   /* Row Format */
   opt = newOption(Option::STRING, Option::ROW_FORMAT, "row-format");
   opt->help =
-      "create table row format. it is the row format of table. a "
-      "table can have compressed, dynamic, redundant row format.\n "
-      "valid values are :\n all: use compressed, dynamic, redundant. all "
-      "combination key block size will be used. \n uncompressed: do not use "
-      "compressed row_format, i.e. key block size will not used. \n"
-      "none: do not use any encryption";
+      "table storage layout policy. MySQL builds accept compressed, dynamic, "
+      "redundant and related combinations.\n"
+      "valid values are:\n all: use all supported MySQL row formats.\n"
+      "uncompressed: do not use compressed row format.\n"
+      "none: disable explicit row-format selection.\n"
+      "PostgreSQL ignores this setting.";
   opt->setString("all");
 
 
-  /* MySQL server option */
-  opt = newOption(Option::STRING, Option::MYSQLD_SERVER_OPTION, "mso");
+  /* Server option */
+  opt = newOption(Option::STRING, Option::MYSQLD_SERVER_OPTION, "server-option");
   opt->help =
-      "mysqld server options variables which are set during the load, see "
-      "--set-variable. n:option=v1=v2 where n is probabality of picking "
-      "option, v1 and v2 different value that is supported. "
-      "for e.g. --md=20:innodb_temp_tablespace_encrypt=on=off";
+      "server variable variations used during workload execution; see "
+      "--set-server-variable. Format: n:option=v1=v2 where n is probability. "
+      "This is currently implemented only for MySQL-style variables.";
 
-  opt = newOption(Option::STRING, Option::SERVER_OPTION_FILE, "sof");
+  opt = newOption(Option::STRING, Option::SERVER_OPTION_FILE, "server-option-file");
   opt->help =
-      "server options file, MySQL server options file, picks some of "
-      "the mysqld options, "
-      "and try to set them during the load , using set global and set "
-      "session.\n see --set-variable.\n File should contain lines like\n "
-      "20:innodb_temp_tablespace_encrypt=on=off\n, means 20% chances "
-      "that it would be processed. ";
+      "server option file used with --set-server-variable.\n"
+      "File lines use the form n:option=v1=v2.\n"
+      "This is currently implemented only for MySQL-style variables.";
 
   /* Set Global */
-  opt = newOption(Option::INT, Option::SET_GLOBAL_VARIABLE, "set-variable");
-  opt->help = "set mysqld variable during the load.(session|global)";
+  opt = newOption(Option::INT, Option::SET_GLOBAL_VARIABLE, "set-server-variable");
+  opt->help = "set server variables during workload execution; currently MySQL-oriented";
   opt->setInt(3);
   opt->setSQL();
   opt->setDDL();
 
   /* alter instance disable/enable redo logging */
   opt = newOption(Option::INT, Option::ALTER_REDO_LOGGING, "alter-redo-log");
-  opt->help = "Alter instance enable/disable redo log";
+  opt->help = "alter redo logging; MySQL-only";
   opt->setInt(0);
   opt->setSQL();
   opt->setDDL();
 
   /* alter instance rotate innodb master key */
   opt = newOption(Option::INT, Option::ALTER_MASTER_KEY, "rotate-master-key");
-  opt->help = "Alter instance rotate innodb master key";
+  opt->help = "rotate storage master key; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /* alter instance rotate innodb system key */
   opt = newOption(Option::INT, Option::ALTER_ENCRYPTION_KEY, "rotate-encryption-key");
-  opt->help = "Alter instance rotate innodb system key X";
+  opt->help = "rotate storage encryption key; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /* alter instance rotate gcache master key */
   opt = newOption(Option::INT, Option::ALTER_GCACHE_MASTER_KEY, "rotate-gcache-key");
-  opt->help = "Alter instance rotate gcache master key";
+  opt->help = "rotate gcache master key; MySQL/PXC-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /* Reload keyring component configuration */
   opt = newOption(Option::INT, Option::ALTER_INSTANCE_RELOAD_KEYRING, "reload-keyring");
-  opt->help = "Alter instance reload keyring";
+  opt->help = "reload keyring component; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
@@ -386,38 +390,38 @@ void add_options() {
   /* rotate redo log key */
   opt = newOption(Option::INT, Option::ROTATE_REDO_LOG_KEY,
                   "rotate-redo-log-key");
-  opt->help = "Rotate redo log key";
+  opt->help = "rotate redo log key; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /*Tablespace Encrytion */
   opt = newOption(Option::INT, Option::ALTER_TABLESPACE_ENCRYPTION,
-                  "alt-tbs-enc");
-  opt->help = "Alter tablespace set Encryption including the mysql tablespace";
+                  "alter-tablespace-encryption");
+  opt->help = "alter tablespace encryption; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /*Discard tablespace */
   opt = newOption(Option::INT, Option::ALTER_DISCARD_TABLESPACE,
-		  "alt-discard-tbs");
-  opt->help = "Alter table to discard file-per-tablespace";
+		  "alter-discard-tablespace");
+  opt->help = "alter table discard tablespace; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /*Database Encryption */
-  opt = newOption(Option::INT, Option::ALTER_DATABASE_ENCRYPTION, "alt-db-enc");
-  opt->help = "Alter Database Encryption mode to Y/N";
+  opt = newOption(Option::INT, Option::ALTER_DATABASE_ENCRYPTION, "alter-database-encryption");
+  opt->help = "alter database encryption mode; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
 
   /* Tablespace Rename */
   opt =
-      newOption(Option::INT, Option::ALTER_TABLESPACE_RENAME, "alt-tbs-rename");
-  opt->help = "Alter tablespace rename";
+      newOption(Option::INT, Option::ALTER_TABLESPACE_RENAME, "alter-tablespace-rename");
+  opt->help = "alter tablespace rename; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
@@ -500,7 +504,7 @@ void add_options() {
 
   /* Alter table Storage Engine to Innodb with different Algorithms */
   opt = newOption(Option::INT, Option::ALTER_ENGINE, "alter-table-engine");
-  opt->help = "alter table engine";
+  opt->help = "alter table storage engine; MySQL-only";
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
@@ -550,15 +554,13 @@ void add_options() {
 
   /* Check Table */
   opt = newOption(Option::INT, Option::CHECK_TABLE, "check");
-  opt->help = "check table, for partition table randomly check either "
-              "partition or full table";
+  opt->help = "check table health. PostgreSQL currently uses a lightweight synthetic check";
   opt->setInt(5);
   opt->setSQL();
 
   /* Check Table Pre-load */
   opt = newOption(Option::BOOL, Option::CHECK_TABLE_PRELOAD, "check-preload");
-  opt->help = "check table, for partition table randomly check either "
-              "partition or full table before the load is started";
+  opt->help = "run preload table checks before starting workload; PostgreSQL uses a synthetic check";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
@@ -586,8 +588,7 @@ void add_options() {
 
   /* Optimize Table */
   opt = newOption(Option::INT, Option::OPTIMIZE, "optimize");
-  opt->help = "optimize table, for paritition table randomly optimize either "
-              "partition or full table ";
+  opt->help = "optimize table. PostgreSQL maps this to VACUUM ANALYZE";
   opt->setInt(3);
   opt->setSQL();
   opt->setDDL();
@@ -608,8 +609,8 @@ void add_options() {
 
   /* DATABASE */
   opt = newOption(Option::STRING, Option::DATABASE, "database");
-  opt->help = "The database to connect to";
-  opt->setString("test");
+  opt->help = "The database or schema target to use";
+  opt->setString("pstress");
 
   /* Address */
   opt = newOption(Option::STRING, Option::ADDRESS, "address");
@@ -627,8 +628,8 @@ void add_options() {
 
   /* Socket */
   opt = newOption(Option::STRING, Option::SOCKET, "socket");
-  opt->help = "Socket file to use";
-  opt->setString("/tmp/socket.sock");
+  opt->help = "Unix domain socket directory to use";
+  opt->setString("");
 
   /*config file */
   opt = newOption(Option::STRING, Option::CONFIGFILE, "config-file");
@@ -637,11 +638,11 @@ void add_options() {
   /*Port */
   opt = newOption(Option::INT, Option::PORT, "port");
   opt->help = "Port to use";
-  opt->setInt(3306);
+  opt->setInt(5432);
 
   /* Password*/
   opt = newOption(Option::STRING, Option::PASSWORD, "password");
-  opt->help = "The MySQL user's password";
+  opt->help = "The PostgreSQL user's password";
   opt->setString("");
 
   /* HELP */
@@ -661,8 +662,8 @@ void add_options() {
 
   /* User*/
   opt = newOption(Option::STRING, Option::USER, "user");
-  opt->help = "The MySQL userID to be used";
-  opt->setString("root");
+  opt->help = "The PostgreSQL user to be used";
+  opt->setString("postgres");
 
   /* log all queries */
   opt = newOption(Option::BOOL, Option::LOG_ALL_QUERIES, "log-all-queries");
@@ -822,7 +823,7 @@ void show_help(Option::Opt option) {
 
 void print_version(void) {
   std::cout << " - PStress v" << PQVERSION << "-" << PQREVISION
-            << " compiled with " << FORK << "-" << mysql_get_client_info()
+            << " compiled with " << FORK << "-" << pq_client_version_string()
             << std::endl;
 }
 
@@ -874,16 +875,16 @@ void show_help(std::string help) {
         << "--address              | IP address to connect to              "
            "       | \n"
         << "--port                 | The port to connect to                "
-           "       | 3306\n"
+           "       | 5432\n"
         << "--infile               | The SQL input file                    "
            "       | pquery.sql\n"
         << "--logdir               | Log directory                         "
            "       | /tmp\n"
-        << "--socket               | Socket file to use                    "
-           "       | /tmp/my.sock\n"
-        << "--user                 | The MySQL userID to be used           "
-           "       | shell user\n"
-        << "--password             | The MySQL user's password             "
+        << "--socket               | Unix socket directory to use          "
+           "       | <empty>\n"
+        << "--user                 | The PostgreSQL user to be used       "
+           "       | postgres\n"
+        << "--password             | The PostgreSQL user's password       "
            "       | <empty>\n"
         << "--threads              | The number of threads to use          "
            "       | 1\n"
@@ -910,6 +911,10 @@ void show_help(std::string help) {
         << "---------------------------------------------------------------"
            "--------------------------"
         << std::endl;
+    std::cout << " - Legacy aliases kept for compatibility: --tbs-count, "
+                 "--no-tbs, --mso, --sof, --set-variable, --no-virtual and "
+                 "the old alt-* tablespace flags"
+              << std::endl;
   }
 
   void show_config_help(void) {
@@ -932,17 +937,17 @@ void show_help(std::string help) {
         << "# IP address to connect to, default is AF_UNIX\n"
         << "address = <empty>\n"
         << "# The port to connect to\n"
-        << "port = 3306\n"
+        << "port = 5432\n"
         << "# The SQL input file\n"
         << "infile = pquery.sql\n"
         << "# Directory to store logs\n"
         << "logdir = /tmp\n"
-        << "# Socket file to use\n"
-        << "socket = /tmp/my.sock\n"
-        << "# The MySQL userID to be used\n"
-        << "user = test\n"
-        << "# The MySQL user's password\n"
-        << "password = test\n"
+        << "# Unix socket directory to use\n"
+        << "socket = \n"
+        << "# The PostgreSQL user to be used\n"
+        << "user = postgres\n"
+        << "# The PostgreSQL user's password\n"
+        << "password = \n"
         << "# The number of threads to use by worker\n"
         << "threads = 1\n"
         << "# The number of queries per thread\n"
