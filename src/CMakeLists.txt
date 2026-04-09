@@ -5,9 +5,12 @@ IF (PG_FOUND)
   INCLUDE_DIRECTORIES(${PG_INCLUDE_DIR})
   ADD_EXECUTABLE(${BINARY_NAME}-${PSTRESS_EXT} pstress.cpp help.cpp node.cpp thread.cpp random_test.cpp)
   TARGET_LINK_LIBRARIES(${BINARY_NAME}-${PSTRESS_EXT} ${PG_LIBRARY} ${OTHER_LIBS} inih++)
-  FILE(COPY
-         grammar.sql
-         DESTINATION .)
+  ADD_CUSTOM_COMMAND(
+    TARGET ${BINARY_NAME}-${PSTRESS_EXT} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/grammar.sql
+            ${CMAKE_CURRENT_BINARY_DIR}/grammar.sql
+  )
   INSTALL(FILES grammar.sql DESTINATION bin)
   INSTALL(TARGETS ${BINARY_NAME}-${PSTRESS_EXT} DESTINATION bin)
 ENDIF(PG_FOUND)

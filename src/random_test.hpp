@@ -81,7 +81,9 @@ public:
 private:
   virtual std::string clause() {
     std::string str = col_type_to_string(type_);
-    if (length > 0)
+    if (length > 0 &&
+        ((std::strcmp(FORK, "PostgreSQL") != 0) ||
+         type_ == CHAR || type_ == VARCHAR))
       str += "(" + std::to_string(length) + ")";
     return str;
   };
@@ -125,7 +127,7 @@ struct Generated_Column : public Column {
   std::string rand_value();
   ~Generated_Column(){};
   COLUMN_TYPES g_type; // sub type can be blob,int, varchar
-  COLUMN_TYPES generate_type() { return g_type; };
+  COLUMN_TYPES generate_type() const { return g_type; };
 };
 
 struct Ind_col {

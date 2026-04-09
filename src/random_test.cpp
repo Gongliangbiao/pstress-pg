@@ -90,6 +90,100 @@ static std::string pg_partition_target(Table *table) {
       table, "p" + std::to_string(rand_int(part->number_of_part - 1)));
 }
 
+static bool supports_like_predicate(const Column *column) {
+  if (column->type_ == Column::GENERATED) {
+    auto generated =
+        static_cast<const Generated_Column *>(column)->generate_type();
+    return generated == Column::CHAR || generated == Column::VARCHAR ||
+           generated == Column::BLOB;
+  }
+  switch (column->type_) {
+  case Column::CHAR:
+  case Column::VARCHAR:
+  case Column::BLOB:
+    return true;
+  case Column::INTEGER:
+  case Column::INT:
+  case Column::FLOAT:
+  case Column::DOUBLE:
+  case Column::BOOL:
+  case Column::GENERATED:
+  case Column::COLUMN_MAX:
+    return false;
+  }
+  return false;
+}
+
+static bool column_name_exists(const Table *table, const std::string &name) {
+  for (auto *column : *table->columns_) {
+    if (column->name_ == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool index_name_exists(const Table *table, const std::string &name) {
+  for (auto *index : *table->indexes_) {
+    if (index->name_ == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static int pg_index_width_estimate(const Column *column) {
+  switch (column->type_) {
+  case Column::BOOL:
+    return 1;
+  case Column::INT:
+  case Column::INTEGER:
+  case Column::FLOAT:
+  case Column::DOUBLE:
+    return 8;
+  case Column::CHAR:
+  case Column::VARCHAR:
+    return std::max(1, std::min(column->length, 64));
+  case Column::BLOB:
+    return 128;
+  case Column::GENERATED: {
+    auto generated =
+        static_cast<const Generated_Column *>(column)->generate_type();
+    switch (generated) {
+    case Column::BOOL:
+      return 1;
+    case Column::INT:
+    case Column::INTEGER:
+    case Column::FLOAT:
+    case Column::DOUBLE:
+      return 8;
+    case Column::CHAR:
+    case Column::VARCHAR:
+      return std::max(1, std::min(column->length, 64));
+    case Column::BLOB:
+    case Column::GENERATED:
+    case Column::COLUMN_MAX:
+      return 128;
+    }
+  }
+  case Column::COLUMN_MAX:
+    break;
+  }
+  return 128;
+}
+
+static bool pg_indexable_column(const Column *column) {
+  return pg_index_width_estimate(column) <= 64;
+}
+
+static int pg_index_total_width(const Index *index) {
+  int width = 0;
+  for (auto *ind_col : *index->columns_) {
+    width += pg_index_width_estimate(ind_col->column);
+  }
+  return width;
+}
+
 /* return table pointer of matching table. This is only done during the
  * first step or during the prepare, so you would have only tables that are not
  * renamed  */
@@ -241,6 +335,11 @@ int sum_of_all_options(Thd1 *thd) {
     options->at(Option::ALTER_DATABASE_ENCRYPTION)->setInt(0);
     options->at(Option::UNDO_SQL)->setInt(0);
     options->at(Option::SET_GLOBAL_VARIABLE)->setInt(0);
+    options->at(Option::ADD_DROP_PARTITION)->setInt(0);
+    options->at(Option::DROP_COLUMN)->setInt(0);
+    options->at(Option::ALTER_COLUMN_MODIFY)->setInt(0);
+    options->at(Option::RENAME_COLUMN)->setInt(0);
+    options->at(Option::DROP_CREATE)->setInt(0);
     options->at(Option::PARTITION_PROB)->setInt(25);
     options->at(Option::PARTITION_SUPPORTED)->setString("RANGE,LIST,HASH,KEY");
     g_innodb_page_size = std::stoi(read_single_value("show block_size", thd)) / 1024;
@@ -1017,11 +1116,15 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     }
 
     if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
-      auto size = rand_int(g_max_columns_length, col_pos.size());
+      int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
+      int max_size = std::max(g_max_columns_length, min_size);
+      auto size = rand_int(max_size, std::max(1, min_size));
       int actual_size = 0;
       std::vector<std::string> parts;
       for (auto pos : col_pos) {
-        auto current_size = rand_int((int)size / col_pos.size() * 2, 1);
+        int current_upper =
+            std::max(1, static_cast<int>(size) / static_cast<int>(col_pos.size()) * 2);
+        auto current_size = rand_int(current_upper, 1);
         parts.push_back(pg_generated_text_term(table->columns_->at(pos),
                                                current_size, actual_size));
       }
@@ -1031,14 +1134,12 @@ Generated_Column::Generated_Column(std::string name, Table *table)
         str += "(" + std::to_string(actual_size) + ")";
       str += " GENERATED ALWAYS AS (";
       if (g_type == VARCHAR || g_type == CHAR)
-        str += "(CONCAT(";
-      else
-        str += "CONCAT(";
-      for (const auto &part : parts) {
-        str += part + ", ";
+        str += "(";
+      for (size_t i = 0; i < parts.size(); ++i) {
+        str += parts[i];
+        if (i + 1 != parts.size())
+          str += " || ";
       }
-      str.erase(str.length() - 2);
-      str += ")";
       if (g_type == VARCHAR || g_type == CHAR)
         str += ")::" + col_type_to_string(g_type) + "(" +
                std::to_string(actual_size) + ")";
@@ -1067,12 +1168,16 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     }
     str.pop_back();
   } else if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
-    auto size = rand_int(g_max_columns_length, col_pos.size());
+    int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
+    int max_size = std::max(g_max_columns_length, min_size);
+    auto size = rand_int(max_size, std::max(1, min_size));
     int actual_size = 0;
     std::string gen_sql;
     for (auto pos : col_pos) {
       auto col = table->columns_->at(pos);
-      auto current_size = rand_int((int)size / col_pos.size() * 2, 1);
+      int current_upper =
+          std::max(1, static_cast<int>(size) / static_cast<int>(col_pos.size()) * 2);
+      auto current_size = rand_int(current_upper, 1);
       int column_size = 0;
       /* base column */
       switch (col->type_) {
@@ -1622,7 +1727,7 @@ void Table::DropCreate(Thd1 *thd) {
 
 void Table::Optimize(Thd1 *thd) {
   if (is_postgresql()) {
-    execute_sql("VACUUM ANALYZE " +
+    execute_sql("ANALYZE " +
                     (type == PARTITION ? pg_partition_target(this) : name_),
                 thd);
     return;
@@ -2218,8 +2323,10 @@ void Table::CreateDefaultIndex() {
     return;
 
   /* if table have few column, decrease number of indexes */
-  size_t indexes = rand_int(
-      columns_->size() < max_indexes ? columns_->size() : max_indexes, 1);
+  size_t index_limit = columns_->size() < max_indexes ? columns_->size() : max_indexes;
+  if (is_postgresql())
+    index_limit = std::min<size_t>(index_limit, 4);
+  size_t indexes = rand_int(index_limit, 1);
 
   /* for auto-inc columns handling, we need to add auto_inc as first column */
   for (size_t i = 0; i < columns_->size(); i++) {
@@ -2250,13 +2357,18 @@ void Table::CreateDefaultIndex() {
 
     number_of_columns = rand_int(
         (max_columns < number_of_columns ? max_columns : number_of_columns), 1);
+    if (is_postgresql())
+      number_of_columns = std::min<size_t>(number_of_columns, 4);
 
     std::vector<int> col_pos; // position of columns
 
     /* pick some columns */
-    while (col_pos.size() < number_of_columns) {
+    size_t attempts = 0;
+    while (col_pos.size() < number_of_columns && attempts++ < columns_->size() * 8) {
       int current = rand_int(columns_->size() - 1);
       if (columns_->at(current)->compressed)
+        continue;
+      if (is_postgresql() && !pg_indexable_column(columns_->at(current)))
         continue;
       /* auto-inc column should be first column in auto_inc_index */
       if (auto_inc_pos != -1 && i == auto_inc_index && col_pos.size() == 0)
@@ -2272,6 +2384,9 @@ void Table::CreateDefaultIndex() {
       }
     } // while
 
+    if (col_pos.empty())
+      continue;
+
     for (auto pos : col_pos) {
       auto col = columns_->at(pos);
       static bool no_desc_support = opt_bool(NO_DESC_INDEX);
@@ -2283,6 +2398,16 @@ void Table::CreateDefaultIndex() {
       }
       id->AddInternalColumn(
           new Ind_col(col, column_desc)); // desc is set as true
+      if (is_postgresql() &&
+          (id->columns_->size() >= 4 || pg_index_total_width(id) > 192)) {
+        delete id->columns_->back();
+        id->columns_->pop_back();
+        break;
+      }
+    }
+    if (id->columns_->empty()) {
+      delete id;
+      continue;
     }
     AddInternalIndex(id);
   }
@@ -2437,7 +2562,7 @@ std::string Table::definition(bool with_index) {
           def += "ip_col, " + col->name_;
       } else
         def += col->name_;
-      def += +"), ";
+      def += "), ";
     }
   }
 
@@ -3004,14 +3129,27 @@ void Table::AddColumn(Thd1 *thd) {
 
   Column *tc;
 
-  std::string name = "N" + std::to_string(rand_int(300));
+  for (int attempt = 0; attempt < 64 && tc == nullptr; ++attempt) {
+    std::string name =
+        "N" + std::to_string(rand_int(100000, 1000)) + "_" + std::to_string(attempt);
 
-  if (col_type == Column::GENERATED)
-    tc = new Generated_Column(name, this);
-  else if (col_type == Column::BLOB)
-    tc = new Blob_Column(name, this);
-  else
-    tc = new Column(name, this, col_type);
+    if (col_type == Column::GENERATED)
+      tc = new Generated_Column(name, this);
+    else if (col_type == Column::BLOB)
+      tc = new Blob_Column(name, this);
+    else
+      tc = new Column(name, this, col_type);
+
+    if (column_name_exists(this, tc->name_)) {
+      delete tc;
+      tc = nullptr;
+    }
+  }
+
+  if (tc == nullptr) {
+    table_mutex.unlock();
+    return;
+  }
 
   sql += tc->definition();
 
@@ -3093,21 +3231,35 @@ void Table::DropIndex(Thd1 *thd) {
 
 /*randomly add some index on the table */
 void Table::AddIndex(Thd1 *thd) {
-  auto i = rand_int(1000);
-  Index *id = new Index(name_ + std::to_string(i));
-
   static size_t max_columns = opt_int(INDEX_COLUMNS);
   table_mutex.lock();
+  Index *id = nullptr;
+  for (int attempt = 0; attempt < 64 && id == nullptr; ++attempt) {
+    auto i = rand_int(100000, 1000);
+    std::string candidate = name_ + std::to_string(i);
+    if (!index_name_exists(this, candidate))
+      id = new Index(candidate);
+  }
+
+  if (id == nullptr) {
+    table_mutex.unlock();
+    return;
+  }
 
   /* number of columns to be added */
   int no_of_columns = rand_int(
       (max_columns < columns_->size() ? max_columns : columns_->size()), 1);
+  if (is_postgresql())
+    no_of_columns = std::min(no_of_columns, 4);
 
   std::vector<int> col_pos; // position of columns
 
   /* pick some columns */
-  while (col_pos.size() < (size_t)no_of_columns) {
+  size_t attempts = 0;
+  while (col_pos.size() < (size_t)no_of_columns && attempts++ < columns_->size() * 8) {
     int current = rand_int(columns_->size() - 1);
+    if (is_postgresql() && !pg_indexable_column(columns_->at(current)))
+      continue;
     /* auto-inc column should be first column in auto_inc_index */
     bool already_added = false;
     for (auto id : col_pos) {
@@ -3128,6 +3280,18 @@ void Table::AddIndex(Thd1 *thd) {
                         : false; // 33 % are desc //
     }
     id->AddInternalColumn(new Ind_col(col, column_desc)); // desc is set as true
+    if (is_postgresql() &&
+        (id->columns_->size() >= 4 || pg_index_total_width(id) > 192)) {
+      delete id->columns_->back();
+      id->columns_->pop_back();
+      break;
+    }
+  }
+
+  if (id->columns_->empty()) {
+    table_mutex.unlock();
+    delete id;
+    return;
   }
 
   if (is_postgresql()) {
@@ -3268,6 +3432,10 @@ void Table::IndexRename(Thd1 *thd) {
       new_name = name.substr(0, name.length() - s);
     else
       new_name = name + new_name;
+    if (is_postgresql() && index_name_exists(this, new_name)) {
+      table_mutex.unlock();
+      return;
+    }
     std::string sql = is_postgresql()
                           ? "ALTER INDEX " + name + " RENAME TO " + new_name
                           : "ALTER TABLE " + name_ + " RENAME INDEX " + name +
@@ -3392,8 +3560,10 @@ void Table::DeleteRandomRow(Thd1 *thd) {
   else if (prob <= 99)
     sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
            columns_->at(where)->rand_value();
-  else
+  else if (supports_like_predicate(columns_->at(where)))
     sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
+  else
+    sql += " = " + columns_->at(where)->rand_value();
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -3465,7 +3635,7 @@ void Table::SelectRandomRow(Thd1 *thd) {
   else if (prob <= 96)
     sql += " IN (" + columns_->at(where)->rand_value() + ", " +
            columns_->at(where)->rand_value() + ")";
-  else if (prob <= 98)
+  else if (prob <= 98 && supports_like_predicate(columns_->at(where)))
     sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
   else
     sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
@@ -3560,9 +3730,12 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     sql += columns_->at(where)->name_ + " BETWEEN " +
            columns_->at(where)->rand_value() + " AND " +
            columns_->at(where)->rand_value();
-  else
+  else if (supports_like_predicate(columns_->at(where)))
     sql += columns_->at(where)->name_ + " LIKE " +
            prepare_like_string(columns_->at(where)->rand_value());
+  else
+    sql += columns_->at(where)->name_ + " = " +
+           columns_->at(where)->rand_value();
 
   table_mutex.unlock();
   execute_sql(sql, thd);
