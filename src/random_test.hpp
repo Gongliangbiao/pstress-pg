@@ -21,10 +21,6 @@
 #include <vector>
 #include <writer.h>
 #include <unordered_map>
-#define INNODB_16K_PAGE_SIZE 16
-#define INNODB_8K_PAGE_SIZE 8
-#define INNODB_32K_PAGE_SIZE 32
-#define INNODB_64K_PAGE_SIZE 64
 #define MAX_PATH 512
 #define MIN_SEED_SIZE 10000
 #define MAX_SEED_SIZE 100000
@@ -203,10 +199,6 @@ struct Table {
   void Analyze(Thd1 *thd);
   void Check(Thd1 *thd);
   void Truncate(Thd1 *thd);
-  void SetEncryption(Thd1 *thd);
-  void SetEncryptionInplace(Thd1 *thd);
-  void SetTableCompression(Thd1 *thd);
-  void SetAlterEngine(Thd1 *thd);
   void ModifyColumn(Thd1 *thd);
   void InsertRandomRow(Thd1 *thd);
   bool InsertBulkRecord(Thd1 *thd);
@@ -214,7 +206,6 @@ struct Table {
   void AddColumn(Thd1 *thd);
   void DropIndex(Thd1 *thd);
   void AddIndex(Thd1 *thd);
-  void alter_discard_tablespace(Thd1 *thd);
   void DeleteRandomRow(Thd1 *thd);
   void UpdateRandomROW(Thd1 *thd);
   void SelectRandomRow(Thd1 *thd);
@@ -435,12 +426,7 @@ bool execute_sql(const std::string &sql, Thd1 *thd);
 
 void save_metadata_to_file();
 void clean_up_at_end();
-void alter_tablespace_encryption(Thd1 *thd);
-void alter_tablespace_rename(Thd1 *thd);
-void set_mysqld_variable(Thd1 *thd);
 void add_server_options(std::string str);
-void alter_database_encryption(Thd1 *thd);
-void create_in_memory_data();
 void generate_metadata_for_tables();
 void create_database_tablespace(Thd1 *thd);
 #endif

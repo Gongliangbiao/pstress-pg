@@ -26,18 +26,10 @@ const int version = 2;
 todo allow this option to be configured by user */
 const int g_integer_range = 100;
 
-static bool keyring_comp_status = false;
 static std::vector<Table *> *all_tables = new std::vector<Table *>;
-static std::vector<std::string> g_undo_tablespace;
-static std::vector<std::string> g_encryption;
-static std::vector<std::string> g_compression = {"none", "zlib", "lz4"};
-static std::vector<std::string> g_row_format;
-static std::vector<std::string> g_tablespace;
 static std::vector<std::string> locks;
 static std::vector<std::string> algorithms;
-static std::vector<int> g_key_block_size;
 static int g_max_columns_length = 30;
-static int g_innodb_page_size;
 static int sum_of_all_opts = 0; // sum of all probablility
 std::mutex ddl_logs_write;
 static std::chrono::system_clock::time_point start_time =
@@ -286,66 +278,10 @@ static std::string read_single_value(const std::string &sql, Thd1 *thd) {
   return query_result;
 }
 
-/* return server version in number format
- Example 8.0.26 -> 80026
- Example 5.7.35 -> 50735
-*/
-static int get_server_version() {
-  const int libpq_version = PQlibVersion();
-  std::string ps_base =
-      std::to_string(libpq_version / 10000) + "." +
-      std::to_string((libpq_version / 100) % 100) + "." +
-      std::to_string(libpq_version % 100);
-  unsigned long major = 0, minor = 0, version = 0;
-  std::size_t major_p = ps_base.find(".");
-  if (major_p != std::string::npos)
-    major = stoi(ps_base.substr(0, major_p));
-
-  std::size_t minor_p = ps_base.find(".", major_p + 1);
-  if (minor_p != std::string::npos)
-    minor = stoi(ps_base.substr(major_p + 1, minor_p - major_p));
-
-  std::size_t version_p = ps_base.find(".", minor_p + 1);
-  if (version_p != std::string::npos)
-    version = stoi(ps_base.substr(minor_p + 1, version_p - minor_p));
-  else
-    version = stoi(ps_base.substr(minor_p + 1));
-  auto server_version = major * 10000 + minor * 100 + version;
-  return server_version;
-}
-
-/* return server version in number format
- Example 8.0.26 -> 80026
- Example 5.7.35 -> 50735
-*/
-static int server_version() {
-  static int sv = get_server_version();
-  return sv;
-}
-
 /* return probabality of all options and disable some feature based on user
  * request/ branch/ fork */
 int sum_of_all_options(Thd1 *thd) {
-  options->at(Option::ENGINE)->setString("");
-  options->at(Option::NO_TABLESPACE)->setBool(true);
-  options->at(Option::NO_ENCRYPTION)->setBool(true);
-  options->at(Option::NO_COLUMN_COMPRESSION)->setBool(true);
-  options->at(Option::NO_TABLE_COMPRESSION)->setBool(true);
-  options->at(Option::ALTER_TABLE_ENCRYPTION)->setInt(0);
-  options->at(Option::ALTER_DISCARD_TABLESPACE)->setInt(0);
-  options->at(Option::ALTER_ENGINE)->setInt(0);
-  options->at(Option::ALTER_TABLE_COMPRESSION)->setInt(0);
-  options->at(Option::ALTER_INSTANCE_RELOAD_KEYRING)->setInt(0);
-  options->at(Option::ALTER_MASTER_KEY)->setInt(0);
-  options->at(Option::ALTER_ENCRYPTION_KEY)->setInt(0);
-  options->at(Option::ALTER_GCACHE_MASTER_KEY)->setInt(0);
-  options->at(Option::ALTER_REDO_LOGGING)->setInt(0);
-  options->at(Option::ROTATE_REDO_LOG_KEY)->setInt(0);
-  options->at(Option::ALTER_TABLESPACE_ENCRYPTION)->setInt(0);
-  options->at(Option::ALTER_TABLESPACE_RENAME)->setInt(0);
-  options->at(Option::ALTER_DATABASE_ENCRYPTION)->setInt(0);
-  options->at(Option::UNDO_SQL)->setInt(0);
-  options->at(Option::SET_GLOBAL_VARIABLE)->setInt(0);
+  (void)thd;
   options->at(Option::ADD_DROP_PARTITION)->setInt(0);
   options->at(Option::DROP_COLUMN)->setInt(0);
   options->at(Option::ALTER_COLUMN_MODIFY)->setInt(0);
@@ -353,12 +289,8 @@ int sum_of_all_options(Thd1 *thd) {
   options->at(Option::DROP_CREATE)->setInt(0);
   options->at(Option::PARTITION_PROB)->setInt(25);
   options->at(Option::PARTITION_SUPPORTED)->setString("RANGE,LIST,HASH,KEY");
-  g_innodb_page_size = std::stoi(read_single_value("show block_size", thd)) / 1024;
   locks = {"DEFAULT"};
   algorithms = {"DEFAULT"};
-  g_encryption.clear();
-  g_compression.clear();
-  g_tablespace.clear();
 
   /*check which all partition type supported */
   auto part_supp = opt_string(PARTITION_SUPPORTED);
@@ -422,11 +354,8 @@ int sum_of_all_options(Thd1 *thd) {
       algorithms.push_back("DEFAULT");
   }
 
-  if (server_version() >= 80000) {
-    /* for 8.0 default columns set default columns */
-    if (!options->at(Option::COLUMNS)->cl)
-      options->at(Option::COLUMNS)->setInt(7);
-  }
+  if (!options->at(Option::COLUMNS)->cl)
+    options->at(Option::COLUMNS)->setInt(7);
 
   if (options->at(Option::ONLY_PARTITION)->getBool() &&
       options->at(Option::ONLY_TEMPORARY)->getBool())
@@ -464,28 +393,6 @@ int sum_of_all_options(Thd1 *thd) {
   if (options->at(Option::NO_INSERT)->getBool()) {
     opt_int_set(INSERT_RANDOM_ROW, 0);
   }
-  /* if no-tbs, do not execute tablespace related sql */
-  if (options->at(Option::NO_TABLESPACE)->getBool()) {
-    opt_int_set(ALTER_TABLESPACE_RENAME, 0);
-    opt_int_set(ALTER_TABLESPACE_ENCRYPTION, 0);
-  }
-
-  /* If no-encryption is set, disable all encryption options */
-  if (options->at(Option::NO_ENCRYPTION)->getBool()) {
-    opt_int_set(ALTER_TABLE_ENCRYPTION, 0);
-    opt_int_set(ALTER_TABLESPACE_ENCRYPTION, 0);
-    opt_int_set(ALTER_MASTER_KEY, 0);
-    opt_int_set(ALTER_ENCRYPTION_KEY, 0);
-    opt_int_set(ALTER_GCACHE_MASTER_KEY, 0);
-    opt_int_set(ROTATE_REDO_LOG_KEY, 0);
-    opt_int_set(ALTER_DATABASE_ENCRYPTION, 0);
-    opt_int_set(ALTER_INSTANCE_RELOAD_KEYRING, 0);
-  }
-
-  /* if no dynamic variables is passed set-global to zero */
-  if (server_options->empty())
-    opt_int_set(SET_GLOBAL_VARIABLE, 0);
-
   auto only_cl_ddl = opt_bool(ONLY_CL_DDL);
   auto only_cl_sql = opt_bool(ONLY_CL_SQL);
   auto no_ddl = opt_bool(NO_DDL);
@@ -2250,22 +2157,6 @@ bool execute_sql(const std::string &sql, Thd1 *thd) {
   return query_success;
 }
 
-void Table::SetEncryption(Thd1 *thd) {
-  (void)thd;
-  return;
-}
-
-// todo pick relevant table //
-void Table::SetTableCompression(Thd1 *thd) {
-  (void)thd;
-  return;
-}
-
-void Table::SetAlterEngine(Thd1 *thd) {
-  (void)thd;
-  return;
-}
-
 // todo pick relevent table//
 void Table::ModifyColumn(Thd1 *thd) {
   Column *col = nullptr;
@@ -3103,96 +2994,6 @@ void Table::InsertRandomRow(Thd1 *thd) {
   execute_sql(sql, thd);
 }
 
-/* set mysqld_variable */
-void set_mysqld_variable(Thd1 *thd) {
-  static int total_probablity = sum_of_all_server_options();
-  int rd = rand_int(total_probablity);
-  for (auto &opt : *server_options) {
-    if (rd <= opt->prob) {
-      std::string sql = "SET ";
-      sql += rand_int(3) == 0 ? " SESSION " : " GLOBAL ";
-      sql += opt->name + "=" + opt->values.at(rand_int(opt->values.size() - 1));
-      execute_sql(sql, thd);
-    }
-  }
-}
-
-/* alter tablespace set encryption */
-void alter_tablespace_encryption(Thd1 *thd) {
-  std::string tablespace;
-
-  if ((rand_int(10) < 2 && server_version() >= 80000) ||
-      g_tablespace.size() == 0) {
-    tablespace = "mysql";
-  } else if (g_tablespace.size() > 0) {
-    tablespace = g_tablespace[rand_int(g_tablespace.size() - 1)];
-  }
-
-  if (tablespace.size() > 0) {
-    std::string sql = "ALTER TABLESPACE " + tablespace + " ENCRYPTION ";
-    sql += (rand_int(1) == 0 ? "'Y'" : "'N'");
-    execute_sql(sql, thd);
-  }
-}
-
-/* alter table discard tablespace */
-void Table::alter_discard_tablespace(Thd1 *thd) {
-  (void)thd;
-  return;
-}
-
-/* alter instance enable disable redo logging */
-static void alter_redo_logging(Thd1 *thd) {
-  std::string sql = "ALTER INSTANCE ";
-  sql += (rand_int(1) == 0 ? "DISABLE" : "ENABLE");
-  sql += " INNODB REDO_LOG";
-  execute_sql(sql, thd);
-}
-
-/* alter database set encryption */
-void alter_database_encryption(Thd1 *thd) {
-  std::string sql = "ALTER DATABASE test ENCRYPTION ";
-  sql += (rand_int(1) == 0 ? "'Y'" : "'N'");
-  execute_sql(sql, thd);
-}
-
-/* create,alter,drop undo tablespace */
-static void create_alter_drop_undo(Thd1 *thd) {
-  auto x = rand_int(100);
-  if (x < 20) {
-    std::string name =
-        g_undo_tablespace[rand_int(g_undo_tablespace.size() - 1)];
-    std::string sql =
-        "CREATE UNDO TABLESPACE " + name + " ADD DATAFILE '" + name + ".ibu'";
-    execute_sql(sql, thd);
-  }
-  if (x < 40) {
-    std::string sql = "DROP UNDO TABLESPACE " +
-                      g_undo_tablespace[rand_int(g_undo_tablespace.size() - 1)];
-    execute_sql(sql, thd);
-  } else {
-    std::string sql =
-        "ALTER UNDO TABLESPACE " +
-        g_undo_tablespace[rand_int(g_undo_tablespace.size() - 1)] + " SET ";
-    sql += (rand_int(1) == 0 ? "ACTIVE" : "INACTIVE");
-    execute_sql(sql, thd);
-  }
-}
-
-/* alter tablespace rename */
-void alter_tablespace_rename(Thd1 *thd) {
-  if (g_tablespace.size() > 0) {
-    auto tablespace = g_tablespace[rand_int(g_tablespace.size() - 1),
-                                   1]; // don't pick innodb_system;
-    std::string sql = "ALTER TABLESPACE " + tablespace;
-    if (rand_int(1) == 0)
-      sql += "_rename RENAME TO " + tablespace;
-    else
-      sql += " RENAME TO " + tablespace + "_rename";
-    execute_sql(sql, thd);
-  }
-}
-
 /* load special sql from a file */
 static std::vector<std::string> load_grammar_sql_from() {
   std::vector<std::string> array;
@@ -3373,15 +3174,6 @@ void save_metadata_to_file() {
 
   if (!of.good())
     throw std::runtime_error("can't write the JSON string to the file!");
-}
-
-/* create in memory data about tablespaces, row_format, key_block size and undo
- * tablespaces */
-void create_in_memory_data() {
-  g_tablespace.clear();
-  g_row_format.clear();
-  g_key_block_size.clear();
-  g_undo_tablespace.clear();
 }
 
 /*load objects from a file */
@@ -3572,9 +3364,6 @@ bool Thd1::load_metadata() {
   auto initial_seed = opt_int(INITIAL_SEED);
   initial_seed += options->at(Option::STEP)->getInt();
   rng = std::mt19937(initial_seed);
-
-  /* create in-memory data for general tablespaces */
-  create_in_memory_data();
 
   if (options->at(Option::STEP)->getInt() > 1 &&
       !options->at(Option::PREPARE)->getBool()) {
@@ -3780,29 +3569,8 @@ bool Thd1::run_some_query() {
     case Option::DROP_CREATE:
       table->DropCreate(this);
       break;
-    case Option::ALTER_TABLE_ENCRYPTION:
-      table->SetEncryption(this);
-      break;
-    case Option::ALTER_ENGINE:
-      table->SetAlterEngine(this);
-      break;
-    case Option::ALTER_TABLE_COMPRESSION:
-      table->SetTableCompression(this);
-      break;
     case Option::ALTER_COLUMN_MODIFY:
       table->ModifyColumn(this);
-      break;
-    case Option::SET_GLOBAL_VARIABLE:
-      set_mysqld_variable(this);
-      break;
-    case Option::ALTER_TABLESPACE_ENCRYPTION:
-      alter_tablespace_encryption(this);
-      break;
-    case Option::ALTER_DISCARD_TABLESPACE:
-      table->alter_discard_tablespace(this);
-      break;
-    case Option::ALTER_TABLESPACE_RENAME:
-      alter_tablespace_rename(this);
       break;
     case Option::SELECT_ALL_ROW:
       table->SelectAllRow(this);
@@ -3840,33 +3608,6 @@ bool Thd1::run_some_query() {
       break;
     case Option::RENAME_INDEX:
       table->IndexRename(this);
-      break;
-    case Option::ALTER_MASTER_KEY:
-      execute_sql("ALTER INSTANCE ROTATE INNODB MASTER KEY", this);
-      break;
-    case Option::ALTER_ENCRYPTION_KEY:
-      execute_sql("ALTER INSTANCE ROTATE INNODB SYSTEM KEY " +
-                      std::to_string(rand_int(9)),
-                  this);
-      break;
-    case Option::ALTER_GCACHE_MASTER_KEY:
-      execute_sql("ALTER INSTANCE ROTATE GCACHE MASTER KEY", this);
-      break;
-    case Option::ALTER_INSTANCE_RELOAD_KEYRING:
-      if (keyring_comp_status)
-        execute_sql("ALTER INSTANCE RELOAD KEYRING", this);
-      break;
-    case Option::ROTATE_REDO_LOG_KEY:
-      execute_sql("SELECT rotate_system_key(\"percona_redo\")", this);
-      break;
-    case Option::ALTER_REDO_LOGGING:
-      alter_redo_logging(this);
-      break;
-    case Option::ALTER_DATABASE_ENCRYPTION:
-      alter_database_encryption(this);
-      break;
-    case Option::UNDO_SQL:
-      create_alter_drop_undo(this);
       break;
     case Option::GRAMMAR_SQL:
       grammar_sql(all_session_tables, this);

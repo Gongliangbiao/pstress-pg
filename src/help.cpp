@@ -151,10 +151,8 @@ void add_options() {
 
   /* create,alter,drop undo tablespace */
   opt = newOption(Option::INT, Option::UNDO_SQL, "undo-tablespace-sql");
-  opt->help = "probability of running create/alter/drop undo tablespace; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* disable virtual columns*/
   opt = newOption(Option::BOOL, Option::NO_VIRTUAL_COLUMNS, "no-generated-columns");
@@ -300,10 +298,8 @@ void add_options() {
   /*Encrypt table */
   opt = newOption(Option::INT, Option::ALTER_TABLE_ENCRYPTION,
                   "alter-table-encryption");
-  opt->help = "alter table storage encryption; MySQL-only";
-  opt->setInt(10);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* modify column */
   opt = newOption(Option::INT, Option::ALTER_COLUMN_MODIFY, "modify-column");
@@ -315,10 +311,8 @@ void add_options() {
   /*compress table */
   opt = newOption(Option::INT, Option::ALTER_TABLE_COMPRESSION,
                   "alter-table-compression");
-  opt->help = "alter table compression; MySQL-only";
-  opt->setInt(10);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* Row Format */
   opt = newOption(Option::STRING, Option::ROW_FORMAT, "row-format");
@@ -347,84 +341,62 @@ void add_options() {
 
   /* Set Global */
   opt = newOption(Option::INT, Option::SET_GLOBAL_VARIABLE, "set-server-variable");
-  opt->help = "set server variables during workload execution; currently MySQL-oriented";
-  opt->setInt(3);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* alter instance disable/enable redo logging */
   opt = newOption(Option::INT, Option::ALTER_REDO_LOGGING, "alter-redo-log");
-  opt->help = "alter redo logging; MySQL-only";
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
   opt->setInt(0);
-  opt->setSQL();
-  opt->setDDL();
 
   /* alter instance rotate innodb master key */
   opt = newOption(Option::INT, Option::ALTER_MASTER_KEY, "rotate-master-key");
-  opt->help = "rotate storage master key; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* alter instance rotate innodb system key */
   opt = newOption(Option::INT, Option::ALTER_ENCRYPTION_KEY, "rotate-encryption-key");
-  opt->help = "rotate storage encryption key; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* alter instance rotate gcache master key */
   opt = newOption(Option::INT, Option::ALTER_GCACHE_MASTER_KEY, "rotate-gcache-key");
-  opt->help = "rotate gcache master key; MySQL/PXC-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL/PXC-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* Reload keyring component configuration */
   opt = newOption(Option::INT, Option::ALTER_INSTANCE_RELOAD_KEYRING, "reload-keyring");
-  opt->help = "reload keyring component; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* rotate redo log key */
   opt = newOption(Option::INT, Option::ROTATE_REDO_LOG_KEY,
                   "rotate-redo-log-key");
-  opt->help = "rotate redo log key; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /*Tablespace Encrytion */
   opt = newOption(Option::INT, Option::ALTER_TABLESPACE_ENCRYPTION,
                   "alter-tablespace-encryption");
-  opt->help = "alter tablespace encryption; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /*Discard tablespace */
   opt = newOption(Option::INT, Option::ALTER_DISCARD_TABLESPACE,
 		  "alter-discard-tablespace");
-  opt->help = "alter table discard tablespace; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /*Database Encryption */
   opt = newOption(Option::INT, Option::ALTER_DATABASE_ENCRYPTION, "alter-database-encryption");
-  opt->help = "alter database encryption mode; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* Tablespace Rename */
   opt =
       newOption(Option::INT, Option::ALTER_TABLESPACE_RENAME, "alter-tablespace-rename");
-  opt->help = "alter tablespace rename; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* SELECT */
   opt = newOption(Option::BOOL, Option::NO_SELECT, "no-select");
@@ -504,10 +476,8 @@ void add_options() {
 
   /* Alter table Storage Engine to Innodb with different Algorithms */
   opt = newOption(Option::INT, Option::ALTER_ENGINE, "alter-table-engine");
-  opt->help = "alter table storage engine; MySQL-only";
-  opt->setInt(1);
-  opt->setSQL();
-  opt->setDDL();
+  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
+  opt->setInt(0);
 
   /* Add column */
   opt = newOption(Option::INT, Option::ADD_COLUMN, "add-column");

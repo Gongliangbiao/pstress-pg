@@ -119,3 +119,27 @@
 - occasional transaction-abort follow-up errors after an expected constraint
   failure
 - rare deadlocks under concurrent DML
+
+## 2026-04-20 - Iteration 3: remove MySQL-only feature logic
+
+### Scope
+
+- Removed PostgreSQL-inert MySQL-only workload execution paths from
+  `random_test.cpp`, including storage encryption, table compression, storage
+  engine changes, server variable changes, tablespace encryption/rename/discard,
+  key rotation, keyring reload, redo-log toggles, database encryption, and undo
+  tablespace SQL.
+- Removed now-unused MySQL-only in-memory state from `random_test.cpp`.
+- Kept the old command-line options parseable in `help.cpp` for compatibility,
+  but made them inert and non-workload options rather than disabling them at
+  runtime from `random_test.cpp`.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180`
+- Result: completed with exit code `0`
+- Summary: `7/473350` queries failed, `100.00%` successful
+- Remaining failures: partition constraint misses from random partition-targeted
+  inserts only (`23514`)
