@@ -54,8 +54,10 @@ public:
     VARCHAR,
     FLOAT,
     DOUBLE,
+    TIMESTAMP,
     BOOL,
     BLOB,
+    JSON,
     GENERATED,
     COLUMN_MAX // should be last
   } type_;
@@ -81,9 +83,7 @@ public:
 private:
   virtual std::string clause() {
     std::string str = col_type_to_string(type_);
-    if (length > 0 &&
-        ((std::strcmp(FORK, "PostgreSQL") != 0) ||
-         type_ == CHAR || type_ == VARCHAR))
+    if (length > 0 && (type_ == CHAR || type_ == VARCHAR))
       str += "(" + std::to_string(length) + ")";
     return str;
   };

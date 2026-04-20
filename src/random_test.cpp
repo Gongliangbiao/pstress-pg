@@ -26,8 +26,6 @@ const int version = 2;
 todo allow this option to be configured by user */
 const int g_integer_range = 100;
 
-static bool encrypted_temp_tables = false;
-static bool encrypted_sys_tablelspaces = false;
 static bool keyring_comp_status = false;
 static std::vector<Table *> *all_tables = new std::vector<Table *>;
 static std::vector<std::string> g_undo_tablespace;
@@ -53,8 +51,6 @@ std::atomic<bool> run_query_failed(false);
 /* partition type supported by system */
 std::vector<Partition::PART_TYPE> Partition::supported;
 const int maximum_records_in_each_parititon_list = 100;
-
-static const bool g_is_postgresql = strcmp(FORK, "PostgreSQL") == 0;
 
 static bool is_connection_lost(const PGconn *conn, const PGresult *result) {
   if (conn != nullptr && PQstatus(conn) == CONNECTION_BAD) {
@@ -106,7 +102,9 @@ static bool supports_like_predicate(const Column *column) {
   case Column::INT:
   case Column::FLOAT:
   case Column::DOUBLE:
+  case Column::TIMESTAMP:
   case Column::BOOL:
+  case Column::JSON:
   case Column::GENERATED:
   case Column::COLUMN_MAX:
     return false;
@@ -140,11 +138,14 @@ static int pg_index_width_estimate(const Column *column) {
   case Column::INTEGER:
   case Column::FLOAT:
   case Column::DOUBLE:
+  case Column::TIMESTAMP:
     return 8;
   case Column::CHAR:
   case Column::VARCHAR:
     return std::max(1, std::min(column->length, 64));
   case Column::BLOB:
+    return 128;
+  case Column::JSON:
     return 128;
   case Column::GENERATED: {
     auto generated =
@@ -156,11 +157,13 @@ static int pg_index_width_estimate(const Column *column) {
     case Column::INTEGER:
     case Column::FLOAT:
     case Column::DOUBLE:
+    case Column::TIMESTAMP:
       return 8;
     case Column::CHAR:
     case Column::VARCHAR:
       return std::max(1, std::min(column->length, 64));
     case Column::BLOB:
+    case Column::JSON:
     case Column::GENERATED:
     case Column::COLUMN_MAX:
       return 128;
@@ -199,6 +202,16 @@ static Table *pick_table(Table::TABLE_TYPES type, int id) {
       return table;
   }
   return nullptr;
+}
+
+static bool referenced_by_fk(const Table *table) {
+  for (auto *candidate : *all_tables) {
+    if (candidate->type == Table::FK &&
+        static_cast<FK_table *>(candidate)->parent == table) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static bool result_num_fields_safe(Thd1 *thd, int req) {
@@ -313,51 +326,39 @@ static int server_version() {
 /* return probabality of all options and disable some feature based on user
  * request/ branch/ fork */
 int sum_of_all_options(Thd1 *thd) {
-
-  if (g_is_postgresql) {
-    options->at(Option::ENGINE)->setString("");
-    options->at(Option::NO_TABLESPACE)->setBool(true);
-    options->at(Option::NO_ENCRYPTION)->setBool(true);
-    options->at(Option::NO_COLUMN_COMPRESSION)->setBool(true);
-    options->at(Option::NO_TABLE_COMPRESSION)->setBool(true);
-    options->at(Option::ALTER_TABLE_ENCRYPTION)->setInt(0);
-    options->at(Option::ALTER_DISCARD_TABLESPACE)->setInt(0);
-    options->at(Option::ALTER_ENGINE)->setInt(0);
-    options->at(Option::ALTER_TABLE_COMPRESSION)->setInt(0);
-    options->at(Option::ALTER_INSTANCE_RELOAD_KEYRING)->setInt(0);
-    options->at(Option::ALTER_MASTER_KEY)->setInt(0);
-    options->at(Option::ALTER_ENCRYPTION_KEY)->setInt(0);
-    options->at(Option::ALTER_GCACHE_MASTER_KEY)->setInt(0);
-    options->at(Option::ALTER_REDO_LOGGING)->setInt(0);
-    options->at(Option::ROTATE_REDO_LOG_KEY)->setInt(0);
-    options->at(Option::ALTER_TABLESPACE_ENCRYPTION)->setInt(0);
-    options->at(Option::ALTER_TABLESPACE_RENAME)->setInt(0);
-    options->at(Option::ALTER_DATABASE_ENCRYPTION)->setInt(0);
-    options->at(Option::UNDO_SQL)->setInt(0);
-    options->at(Option::SET_GLOBAL_VARIABLE)->setInt(0);
-    options->at(Option::ADD_DROP_PARTITION)->setInt(0);
-    options->at(Option::DROP_COLUMN)->setInt(0);
-    options->at(Option::ALTER_COLUMN_MODIFY)->setInt(0);
-    options->at(Option::RENAME_COLUMN)->setInt(0);
-    options->at(Option::DROP_CREATE)->setInt(0);
-    options->at(Option::PARTITION_PROB)->setInt(25);
-    options->at(Option::PARTITION_SUPPORTED)->setString("RANGE,LIST,HASH,KEY");
-    g_innodb_page_size = std::stoi(read_single_value("show block_size", thd)) / 1024;
-    locks = {"DEFAULT"};
-    algorithms = {"DEFAULT"};
-    g_encryption.clear();
-    g_compression.clear();
-    g_tablespace.clear();
-  }
-
-  /* find out innodb page_size */
-  if (!g_is_postgresql &&
-      options->at(Option::ENGINE)->getString().compare("INNODB") == 0) {
-    g_innodb_page_size =
-        std::stoi(read_single_value("select @@innodb_page_size", thd));
-    assert(g_innodb_page_size % 1024 == 0);
-    g_innodb_page_size /= 1024;
-  }
+  options->at(Option::ENGINE)->setString("");
+  options->at(Option::NO_TABLESPACE)->setBool(true);
+  options->at(Option::NO_ENCRYPTION)->setBool(true);
+  options->at(Option::NO_COLUMN_COMPRESSION)->setBool(true);
+  options->at(Option::NO_TABLE_COMPRESSION)->setBool(true);
+  options->at(Option::ALTER_TABLE_ENCRYPTION)->setInt(0);
+  options->at(Option::ALTER_DISCARD_TABLESPACE)->setInt(0);
+  options->at(Option::ALTER_ENGINE)->setInt(0);
+  options->at(Option::ALTER_TABLE_COMPRESSION)->setInt(0);
+  options->at(Option::ALTER_INSTANCE_RELOAD_KEYRING)->setInt(0);
+  options->at(Option::ALTER_MASTER_KEY)->setInt(0);
+  options->at(Option::ALTER_ENCRYPTION_KEY)->setInt(0);
+  options->at(Option::ALTER_GCACHE_MASTER_KEY)->setInt(0);
+  options->at(Option::ALTER_REDO_LOGGING)->setInt(0);
+  options->at(Option::ROTATE_REDO_LOG_KEY)->setInt(0);
+  options->at(Option::ALTER_TABLESPACE_ENCRYPTION)->setInt(0);
+  options->at(Option::ALTER_TABLESPACE_RENAME)->setInt(0);
+  options->at(Option::ALTER_DATABASE_ENCRYPTION)->setInt(0);
+  options->at(Option::UNDO_SQL)->setInt(0);
+  options->at(Option::SET_GLOBAL_VARIABLE)->setInt(0);
+  options->at(Option::ADD_DROP_PARTITION)->setInt(0);
+  options->at(Option::DROP_COLUMN)->setInt(0);
+  options->at(Option::ALTER_COLUMN_MODIFY)->setInt(0);
+  options->at(Option::RENAME_COLUMN)->setInt(0);
+  options->at(Option::DROP_CREATE)->setInt(0);
+  options->at(Option::PARTITION_PROB)->setInt(25);
+  options->at(Option::PARTITION_SUPPORTED)->setString("RANGE,LIST,HASH,KEY");
+  g_innodb_page_size = std::stoi(read_single_value("show block_size", thd)) / 1024;
+  locks = {"DEFAULT"};
+  algorithms = {"DEFAULT"};
+  g_encryption.clear();
+  g_compression.clear();
+  g_tablespace.clear();
 
   /*check which all partition type supported */
   auto part_supp = opt_string(PARTITION_SUPPORTED);
@@ -384,20 +385,6 @@ int sum_of_all_options(Thd1 *thd) {
     throw std::runtime_error(
         "invalid range for --max-partition. Choose between 1 and 8192");
   ;
-
-  /* for 5.7 disable some features */
-  if (!g_is_postgresql && server_version() < 80000) {
-    opt_int_set(ALTER_TABLESPACE_RENAME, 0);
-    opt_int_set(RENAME_COLUMN, 0);
-    opt_int_set(UNDO_SQL, 0);
-    opt_int_set(ALTER_REDO_LOGGING, 0);
-  }
-
-  /* check if keyring component is installed */
-  if (!g_is_postgresql &&
-      read_single_value("SELECT status_value FROM performance_schema.keyring_component_status WHERE \
-      status_key='component_status'", thd) == "Active")
-    keyring_comp_status = true;
 
   auto lock = opt_string(LOCK);
   if (lock.compare("all") == 0) {
@@ -433,34 +420,6 @@ int sum_of_all_options(Thd1 *thd) {
       algorithms.push_back("INSTANT");
     if (algorithm.find("DEFAULT") != std::string::npos)
       algorithms.push_back("DEFAULT");
-  }
-
-  /* Disabling alter discard tablespace until 8.0.30
-   * Bug: https://jira.percona.com/browse/PS-7865 is fixed by upstream in
-   * MySQL 8.0.31 */
-  if (server_version() >= 80000 && server_version() <= 80030) {
-    opt_int_set(ALTER_DISCARD_TABLESPACE, 0);
-  }
-
-  auto enc_type = options->at(Option::ENCRYPTION_TYPE)->getString();
-
-  /* for percona-server we have additional encryption type keyring */
-  if (enc_type.compare("all") == 0) {
-    g_encryption = {"Y", "N"};
-    if (strcmp(FORK, "Percona-Server") == 0) {
-      g_encryption.push_back("KEYRING");
-    }
-  } else if (enc_type.compare("oracle") == 0) {
-    g_encryption = {"Y", "N"};
-    options->at(Option::ALTER_ENCRYPTION_KEY)->setInt(0);
-  } else
-    g_encryption = {enc_type};
-
-  /* feature not supported by oracle */
-  if (strcmp(FORK, "MySQL") == 0) {
-    options->at(Option::ALTER_DATABASE_ENCRYPTION)->setInt(0);
-    options->at(Option::NO_COLUMN_COMPRESSION)->setBool("true");
-    options->at(Option::ALTER_ENCRYPTION_KEY)->setInt(0);
   }
 
   if (server_version() >= 80000) {
@@ -511,17 +470,6 @@ int sum_of_all_options(Thd1 *thd) {
     opt_int_set(ALTER_TABLESPACE_ENCRYPTION, 0);
   }
 
-  /* options to disable if engine is not INNODB */
-  std::string engine = options->at(Option::ENGINE)->getString();
-  std::transform(engine.begin(), engine.end(), engine.begin(), ::toupper);
-  if (engine.compare("ROCKSDB") == 0) {
-    options->at(Option::NO_TEMPORARY)->setBool("true");
-    options->at(Option::NO_COLUMN_COMPRESSION)->setBool("true");
-    options->at(Option::NO_ENCRYPTION)->setBool(true);
-    options->at(Option::NO_DESC_INDEX)->setBool(true);
-    options->at(Option::NO_TABLE_COMPRESSION)->setBool(true);
-  }
-
   /* If no-encryption is set, disable all encryption options */
   if (options->at(Option::NO_ENCRYPTION)->getBool()) {
     opt_int_set(ALTER_TABLE_ENCRYPTION, 0);
@@ -532,32 +480,6 @@ int sum_of_all_options(Thd1 *thd) {
     opt_int_set(ROTATE_REDO_LOG_KEY, 0);
     opt_int_set(ALTER_DATABASE_ENCRYPTION, 0);
     opt_int_set(ALTER_INSTANCE_RELOAD_KEYRING, 0);
-  }
-
-  if (!g_is_postgresql &&
-      read_single_value("select @@innodb_temp_tablespace_encrypt", thd) ==
-      "1")
-    encrypted_temp_tables = true;
-
-  if (!g_is_postgresql && strcmp(FORK, "Percona-Server") == 0 &&
-      read_single_value("select @@innodb_sys_tablespace_encrypt", thd) ==
-          "1")
-    encrypted_sys_tablelspaces = true;
-
-  /* Disable GCache encryption for MS or PS, only supported in PXC-8.0 */
-  if (strcmp(FORK, "Percona-XtraDB-Cluster") != 0 ||
-      (strcmp(FORK, "Percona-XtraDB-Cluster") == 0 && server_version() < 80000))
-    opt_int_set(ALTER_GCACHE_MASTER_KEY, 0);
-
-  /* If OS is Mac, disable table compression as hole punching is not supported
-   * on OSX */
-  if (strcmp(PLATFORM_ID, "Darwin") == 0)
-    options->at(Option::NO_TABLE_COMPRESSION)->setBool(true);
-
-  /* If no-table-compression is set, disable all compression */
-  if (options->at(Option::NO_TABLE_COMPRESSION)->getBool()) {
-    opt_int_set(ALTER_TABLE_COMPRESSION, 0);
-    g_compression.clear();
   }
 
   /* if no dynamic variables is passed set-global to zero */
@@ -639,51 +561,11 @@ int sum_of_all_server_options() {
 inline static std::string
 pick_algorithm_lock(std::string *const algo = nullptr,
                     std::string *const lock = nullptr) {
-  if (g_is_postgresql) {
-    if (algo != nullptr)
-      *algo = "DEFAULT";
-    if (lock != nullptr)
-      *lock = "DEFAULT";
-    return "";
-  }
-
-  std::string current_lock;
-  std::string current_algo;
-
-  current_algo = algorithms[rand_int(algorithms.size() - 1)];
-
-/*
-  Support Matrix	LOCK=DEFAULT	LOCK=EXCLUSIVE	 LOCK=NONE      LOCK=SHARED
-  ALGORITHM=INPLACE	Supported	Supported	 Supported      Supported
-  ALGORITHM=COPY	Supported	Supported	 Not Supported  Supported
-  ALGORITHM=INSTANT	Supported	Not Supported	 Not Supported  Not Supported
-  ALGORITHM=DEFAULT	Supported	Supported        Supported      Supported
-*/
-
-  /* If current_algo=INSTANT, we can set current_lock=DEFAULT directly as it is
-   * the only supported option */
-  if (current_algo == "INSTANT")
-    current_lock = "DEFAULT";
-  /* If current_algo=COPY; MySQL supported LOCK values are
-   * DEFAULT,EXCLUSIVE,SHARED. At this point, it may pick LOCK=NONE as well, but
-   * we will handle it later in the code. If current_algo=INPLACE|DEFAULT;
-   * randomly pick any value, since all lock types are supported.*/
-  else
-    current_lock = locks[rand_int(locks.size() - 1)];
-
-  /* Handling the incompatible combination at the end.
-   * A user may see a deviation if he has opted for --alter-lock to NOT
-   * run with DEFAULT. But this is an exceptional case.
-   */
-  if (current_algo == "COPY" && current_lock == "NONE")
-    current_lock = "DEFAULT";
-
   if (algo != nullptr)
-    *algo = current_algo;
+    *algo = "DEFAULT";
   if (lock != nullptr)
-    *lock = current_lock;
-
-  return " LOCK=" + current_lock + ", ALGORITHM=" + current_algo;
+    *lock = "DEFAULT";
+  return "";
 }
 
 /* set seed of current thread */
@@ -770,6 +652,29 @@ std::string rand_string(int upper, int lower) {
   return rs;
 }
 
+static std::string rand_timestamp_value() {
+  int year = rand_int(2030, 2000);
+  int month = rand_int(12, 1);
+  int day = rand_int(28, 1);
+  int hour = rand_int(23, 0);
+  int minute = rand_int(59, 0);
+  int second = rand_int(59, 0);
+  std::ostringstream out;
+  out << "'" << year << "-"
+      << std::setw(2) << std::setfill('0') << month << "-"
+      << std::setw(2) << std::setfill('0') << day << " "
+      << std::setw(2) << std::setfill('0') << hour << ":"
+      << std::setw(2) << std::setfill('0') << minute << ":"
+      << std::setw(2) << std::setfill('0') << second << "'";
+  return out.str();
+}
+
+static std::string rand_json_value() {
+  return "'{\"k\":" + std::to_string(rand_int(100000)) + ",\"s\":\"" +
+         rand_string(12, 3) + "\",\"b\":" + (rand_int(1) == 1 ? "true" : "false") +
+         "}'::jsonb";
+}
+
 /* return column type from a string */
 Column::COLUMN_TYPES Column::col_type(std::string type) {
   if (type.compare("INTEGER") == 0)
@@ -798,6 +703,10 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return DOUBLE;
   else if (type.compare("DOUBLE PRECISION") == 0)
     return DOUBLE;
+  else if (type.compare("TIMESTAMP") == 0)
+    return TIMESTAMP;
+  else if (type.compare("JSON") == 0 || type.compare("JSONB") == 0)
+    return JSON;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -813,15 +722,19 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
   case CHAR:
     return "CHAR";
   case DOUBLE:
-    return g_is_postgresql ? "DOUBLE PRECISION" : "DOUBLE";
+    return "DOUBLE PRECISION";
   case FLOAT:
-    return g_is_postgresql ? "REAL" : "FLOAT";
+    return "REAL";
   case VARCHAR:
     return "VARCHAR";
+  case TIMESTAMP:
+    return "TIMESTAMP";
   case BOOL:
-    return g_is_postgresql ? "BOOLEAN" : "BOOL";
+    return "BOOLEAN";
   case BLOB:
-    return g_is_postgresql ? "TEXT" : "BLOB";
+    return "TEXT";
+  case JSON:
+    return "JSONB";
   case GENERATED:
     return "GENERATED";
   case COLUMN_MAX:
@@ -854,6 +767,8 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
                        options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt());
     break;
   }
+  case Column::COLUMN_TYPES::TIMESTAMP:
+    return rand_timestamp_value();
   case Column::COLUMN_TYPES::CHAR:
   case Column::COLUMN_TYPES::VARCHAR:
     return "\'" + rand_string(length) + "\'";
@@ -866,6 +781,8 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     if (rand_int(10) != 10)
       rand_length /= 10;
     return "\'" + rand_string(rand_length) + "\'";
+  case Column::COLUMN_TYPES::JSON:
+    return rand_json_value();
     break;
   case Column::COLUMN_TYPES::GENERATED:
   case Column::COLUMN_TYPES::COLUMN_MAX:
@@ -906,11 +823,7 @@ std::string Column::definition() {
   if (null)
     def += " NOT NULL";
   if (auto_increment)
-    def += g_is_postgresql ? " GENERATED BY DEFAULT AS IDENTITY"
-                           : " AUTO_INCREMENT";
-  if (compressed && !g_is_postgresql) {
-    def += " COLUMN_FORMAT COMPRESSED";
-  }
+    def += " GENERATED BY DEFAULT AS IDENTITY";
   return def;
 }
 
@@ -939,8 +852,14 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
   case DOUBLE:
     name_ = "d" + name;
     break;
+  case TIMESTAMP:
+    name_ = "ts" + name;
+    break;
   case BOOL:
     name_ = "t" + name;
+    break;
+  case JSON:
+    name_ = "j" + name;
     break;
   default:
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
@@ -952,37 +871,9 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
 Blob_Column::Blob_Column(std::string name, Table *table)
     : Column(table, Column::BLOB) {
 
-  if (options->at(Option::NO_COLUMN_COMPRESSION)->getBool() == false &&
-      rand_int(1) == 1)
-    compressed = true;
-  if (g_is_postgresql) {
-    sub_type = "TEXT";
-    name_ = "t" + name;
-    compressed = false;
-    return;
-  }
-  switch (rand_int(5, 1)) {
-  case 1:
-    sub_type = "MEDIUMTEXT";
-    name_ = "mt" + name;
-    break;
-  case 2:
-    sub_type = "TEXT";
-    name_ = "t" + name;
-    break;
-  case 3:
-    sub_type = "LONGTEXT";
-    name_ = "lt" + name;
-    break;
-  case 4:
-    sub_type = "BLOB";
-    name_ = "b" + name;
-    break;
-  case 5:
-    sub_type = "LONGBLOB";
-    name_ = "lb" + name;
-    break;
-  }
+  sub_type = "TEXT";
+  name_ = "t" + name;
+  compressed = false;
 }
 
 Blob_Column::Blob_Column(std::string name, Table *table, std::string sub_type_)
@@ -999,12 +890,17 @@ static std::string pg_generated_numeric_term(const Column *col) {
   case Column::FLOAT:
   case Column::DOUBLE:
     return "ROUND(" + col->name_ + ")::INTEGER";
+  case Column::TIMESTAMP:
+    return "(MOD(EXTRACT(EPOCH FROM " + col->name_ +
+           ")::BIGINT, 1000000))::INTEGER";
   case Column::BOOL:
     return "(CASE WHEN " + col->name_ + " THEN 1 ELSE 0 END)";
   case Column::VARCHAR:
   case Column::CHAR:
   case Column::BLOB:
     return "LENGTH(COALESCE(" + col->name_ + "::TEXT, ''))";
+  case Column::JSON:
+    return "COALESCE((" + col->name_ + "->>'k')::INTEGER, 0)";
   case Column::GENERATED:
   case Column::COLUMN_MAX:
     break;
@@ -1028,6 +924,11 @@ static std::string pg_generated_text_term(const Column *col, int limit,
     column_size = 10;
     expr = "COALESCE(" + col->name_ + "::TEXT, '')";
     break;
+  case Column::TIMESTAMP:
+    column_size = 19;
+    expr = "COALESCE((MOD(EXTRACT(EPOCH FROM " + col->name_ +
+           ")::BIGINT, 1000000))::TEXT, '')";
+    break;
   case Column::BOOL:
     column_size = 5;
     expr = "(CASE WHEN " + col->name_ + " THEN 'true' ELSE 'false' END)";
@@ -1040,6 +941,10 @@ static std::string pg_generated_text_term(const Column *col, int limit,
   case Column::BLOB:
     column_size = 5000;
     expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::JSON:
+    column_size = 128;
+    expr = "COALESCE(" + col->name_ + "->>'s', '')";
     break;
   case Column::GENERATED:
   case Column::COLUMN_MAX:
@@ -1099,136 +1004,53 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       col_pos.push_back(col);
   }
 
-  if (g_is_postgresql) {
-    if (g_type == INT || g_type == INTEGER) {
-      std::vector<std::string> terms;
-      for (auto pos : col_pos) {
-        terms.push_back(pg_generated_numeric_term(table->columns_->at(pos)));
-      }
-
-      str = " " + col_type_to_string(g_type) + " GENERATED ALWAYS AS ((";
-      for (const auto &term : terms) {
-        str += term + " + ";
-      }
-      str.erase(str.length() - 3);
-      str += ")::INTEGER) STORED";
-      return;
-    }
-
-    if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
-      int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
-      int max_size = std::max(g_max_columns_length, min_size);
-      auto size = rand_int(max_size, std::max(1, min_size));
-      int actual_size = 0;
-      std::vector<std::string> parts;
-      for (auto pos : col_pos) {
-        int current_upper =
-            std::max(1, static_cast<int>(size) / static_cast<int>(col_pos.size()) * 2);
-        auto current_size = rand_int(current_upper, 1);
-        parts.push_back(pg_generated_text_term(table->columns_->at(pos),
-                                               current_size, actual_size));
-      }
-
-      str = " " + col_type_to_string(g_type);
-      if (g_type == VARCHAR || g_type == CHAR)
-        str += "(" + std::to_string(actual_size) + ")";
-      str += " GENERATED ALWAYS AS (";
-      if (g_type == VARCHAR || g_type == CHAR)
-        str += "(";
-      for (size_t i = 0; i < parts.size(); ++i) {
-        str += parts[i];
-        if (i + 1 != parts.size())
-          str += " || ";
-      }
-      if (g_type == VARCHAR || g_type == CHAR)
-        str += ")::" + col_type_to_string(g_type) + "(" +
-               std::to_string(actual_size) + ")";
-      str += ") STORED";
-      length = actual_size;
-      return;
-    }
-
-    throw std::runtime_error("unhandled " + col_type_to_string(g_type) +
-                             " at line " + std::to_string(__LINE__));
-  }
-
   if (g_type == INT || g_type == INTEGER) {
-    str = " " + col_type_to_string(g_type) + " GENERATED ALWAYS AS (";
+    std::vector<std::string> terms;
     for (auto pos : col_pos) {
-      auto col = table->columns_->at(pos);
-      if (col->type_ == VARCHAR || col->type_ == CHAR || col->type_ == BLOB)
-        str += " LENGTH(" + col->name_ + ")+";
-      else if (col->type_ == INT || col->type_ == INTEGER ||
-               col->type_ == BOOL || col->type_ == FLOAT ||
-               col->type_ == DOUBLE)
-        str += " " + col->name_ + "+";
-      else
-        throw std::runtime_error("unhandled " + col_type_to_string(col->type_) +
-                                 " at line " + std::to_string(__LINE__));
+      terms.push_back(pg_generated_numeric_term(table->columns_->at(pos)));
     }
-    str.pop_back();
+    str = " " + col_type_to_string(g_type) + " GENERATED ALWAYS AS ((";
+    for (const auto &term : terms) {
+      str += term + " + ";
+    }
+    str.erase(str.length() - 3);
+    str += ")::INTEGER) STORED";
+    return;
   } else if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
     int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
     int max_size = std::max(g_max_columns_length, min_size);
     auto size = rand_int(max_size, std::max(1, min_size));
     int actual_size = 0;
-    std::string gen_sql;
+    std::vector<std::string> parts;
     for (auto pos : col_pos) {
-      auto col = table->columns_->at(pos);
       int current_upper =
           std::max(1, static_cast<int>(size) / static_cast<int>(col_pos.size()) * 2);
       auto current_size = rand_int(current_upper, 1);
-      int column_size = 0;
-      /* base column */
-      switch (col->type_) {
-      case INT:
-      case INTEGER:
-        column_size = 10; // interger max string size is 10
-        break;
-      case FLOAT:
-      case DOUBLE:
-        column_size = 10;
-        break;
-      case BOOL:
-        column_size = 1;
-        break;
-      case VARCHAR:
-      case CHAR:
-        column_size = col->length;
-        break;
-      case BLOB:
-        column_size = 5000; // todo set it different subtype
-        break;
-      case COLUMN_MAX:
-      case GENERATED:
-        throw std::runtime_error("unhandled " + col_type_to_string(col->type_) +
-                                 " at line " + std::to_string(__LINE__));
-      }
-      if (column_size > current_size) {
-        actual_size += current_size;
-        gen_sql += "SUBSTRING(" + col->name_ + ",1," +
-                   std::to_string(current_size) + "),";
-      } else {
-        actual_size += column_size;
-        gen_sql += col->name_ + ",";
-      }
+      parts.push_back(pg_generated_text_term(table->columns_->at(pos),
+                                             current_size, actual_size));
     }
-    gen_sql.pop_back();
+
     str = " " + col_type_to_string(g_type);
     if (g_type == VARCHAR || g_type == CHAR)
       str += "(" + std::to_string(actual_size) + ")";
-    str += " GENERATED ALWAYS AS (CONCAT(";
-    str += gen_sql;
-    str += ")";
+    str += " GENERATED ALWAYS AS (";
+    if (g_type == VARCHAR || g_type == CHAR)
+      str += "(";
+    for (size_t i = 0; i < parts.size(); ++i) {
+      str += parts[i];
+      if (i + 1 != parts.size())
+        str += " || ";
+    }
+    if (g_type == VARCHAR || g_type == CHAR)
+      str += ")::" + col_type_to_string(g_type) + "(" +
+             std::to_string(actual_size) + ")";
+    str += ") STORED";
     length = actual_size;
+    return;
   } else {
     throw std::runtime_error("unhandled " + col_type_to_string(g_type) +
                              " at line " + std::to_string(__LINE__));
   }
-  str += ")";
-
-  if (rand_int(2) == 1 || compressed)
-    str += " STORED";
 }
 
 template <typename Writer> void Column::Serialize(Writer &writer) const {
@@ -1405,11 +1227,7 @@ template <typename Writer> void Table::Serialize(Writer &writer) const {
     writer.String("");
 
   writer.String("storage_encryption");
-  if (!g_is_postgresql && !storage_encryption.empty())
-    writer.String(storage_encryption.c_str(),
-                  static_cast<SizeType>(storage_encryption.length()));
-  else
-    writer.String("");
+  writer.String("");
 
   writer.String("storage_compression");
   if (!storage_compression.empty())
@@ -1459,14 +1277,6 @@ static std::string index_column_list(const Index *index) {
   for (auto idc : *index->columns_) {
     def += idc->column->name_;
 
-    if (!g_is_postgresql &&
-        (idc->column->type_ == Column::BLOB ||
-         (idc->column->type_ == Column::GENERATED &&
-          static_cast<Generated_Column *>(idc->column)->generate_type() ==
-              Column::BLOB))) {
-      def += "(" + std::to_string(rand_int(g_max_columns_length, 1)) + ")";
-    }
-
     def += (idc->desc ? " DESC" : (rand_int(3) ? "" : " ASC"));
     def += ", ";
   }
@@ -1489,13 +1299,32 @@ static std::vector<Column *> primary_key_columns(const Table *table) {
   return pk_columns;
 }
 
+static std::string fk_reference_value_expr(const Table *table) {
+  if (table == nullptr || table->type != Table::FK) {
+    return "";
+  }
+
+  const auto *fk_table = static_cast<const FK_table *>(table);
+  if (fk_table->parent == nullptr) {
+    return "NULL";
+  }
+
+  auto pk_columns = primary_key_columns(fk_table->parent);
+  if (pk_columns.empty()) {
+    return "NULL";
+  }
+
+  return "(SELECT " + pk_columns.front()->name_ + " FROM " +
+         fk_table->parent->name_ + " ORDER BY random() LIMIT 1)";
+}
+
 /* index definition */
 std::string Index::definition() {
   return "INDEX " + name_ + "(" + index_column_list(this) + ") ";
 }
 
 static bool load_pg_partitions(Table *table, Thd1 *thd) {
-  if (!g_is_postgresql || table->type != Table::PARTITION) {
+  if (table->type != Table::PARTITION) {
     return true;
   }
 
@@ -1600,11 +1429,7 @@ bool Table::load_secondary_indexes(Thd1 *thd) {
     return true;
 
   for (auto id : *indexes_) {
-    if (!g_is_postgresql && id == indexes_->at(auto_inc_index))
-      continue;
-    std::string sql = g_is_postgresql ? create_index_sql(this, id)
-                                      : "ALTER TABLE " + name_ + " ADD " +
-                                            id->definition();
+    std::string sql = create_index_sql(this, id);
     if (!execute_sql(sql, thd)) {
       thd->thread_log << "Failed to add index " << id->name_ << " on " << name_
                       << std::endl;
@@ -1703,442 +1528,179 @@ Partition::Partition(std::string n) : Table(n) {
 
 void Table::DropCreate(Thd1 *thd) {
   execute_sql("DROP TABLE " + name_, thd);
-  std::string def = definition();
-  if (!execute_sql(def, thd) && storage_tablespace.size() > 0) {
-    std::string tbs = " TABLESPACE=" + storage_tablespace + "_rename";
-
-    auto no_encryption = opt_bool(NO_ENCRYPTION);
-
-    std::string encrypt_sql = " ENCRYPTION = " + storage_encryption;
-
-    /* If tablespace is rename or encrypted, or tablespace rename/encrypted */
-    if (!execute_sql(def + tbs, thd))
-      if (!no_encryption && (execute_sql(def + encrypt_sql, thd) ||
-                             execute_sql(def + encrypt_sql + tbs, thd))) {
-        table_mutex.lock();
-        if (storage_encryption.compare("Y") == 0)
-          storage_encryption = 'N';
-        else if (storage_encryption.compare("N") == 0)
-          storage_encryption = 'Y';
-        table_mutex.unlock();
-      }
-  }
+  execute_sql(definition(), thd);
 }
 
 void Table::Optimize(Thd1 *thd) {
-  if (g_is_postgresql) {
-    execute_sql("ANALYZE " +
-                    (type == PARTITION ? pg_partition_target(this) : name_),
-                thd);
-    return;
-  }
-  if (type == PARTITION && rand_int(4) == 1) {
-    table_mutex.lock();
-    int partition =
-        rand_int(static_cast<Partition *>(this)->number_of_part - 1);
-    table_mutex.unlock();
-    execute_sql("ALTER TABLE " + name_ + " OPTIMIZE PARTITION p" +
-                    std::to_string(partition),
-                thd);
-  } else
-    execute_sql("OPTIMIZE TABLE " + name_, thd);
+  execute_sql("ANALYZE " + (type == PARTITION ? pg_partition_target(this) : name_),
+              thd);
 }
 
 void Table::Check(Thd1 *thd) {
-  if (g_is_postgresql) {
-    auto rel = type == PARTITION ? pg_partition_target(this) : name_;
-    get_check_result("SELECT current_database(), '" + rel + "', 'check', 'OK'",
-                     thd);
-    return;
-  }
-  if (type == PARTITION && rand_int(4) == 1) {
-    table_mutex.lock();
-    int partition =
-        rand_int(static_cast<Partition *>(this)->number_of_part - 1);
-    table_mutex.unlock();
-    get_check_result("ALTER TABLE " + name_ + " CHECK PARTITION p" +
-                         std::to_string(partition),
-                     thd);
-  } else
-    get_check_result("CHECK TABLE " + name_, thd);
+  auto rel = type == PARTITION ? pg_partition_target(this) : name_;
+  get_check_result("SELECT current_database(), '" + rel + "', 'check', 'OK'",
+                   thd);
 }
 
 void Table::Analyze(Thd1 *thd) {
-  if (g_is_postgresql) {
-    execute_sql("ANALYZE " + (type == PARTITION ? pg_partition_target(this) : name_),
-                thd);
-    return;
-  }
-  if (type == PARTITION && rand_int(4) == 1) {
-    table_mutex.lock();
-    int partition =
-        rand_int(static_cast<Partition *>(this)->number_of_part - 1);
-    table_mutex.unlock();
-    execute_sql("ALTER TABLE " + name_ + " ANALYZE PARTITION p" +
-                    std::to_string(partition),
-                thd);
-  } else
-    execute_sql("ANALYZE TABLE " + name_, thd);
+  execute_sql("ANALYZE " + (type == PARTITION ? pg_partition_target(this) : name_),
+              thd);
 }
 
 void Table::Truncate(Thd1 *thd) {
-  if (g_is_postgresql) {
-    execute_sql("TRUNCATE TABLE " +
-                    (type == PARTITION ? pg_partition_target(this) : name_),
-                thd);
+  if (referenced_by_fk(this)) {
     return;
   }
-  /* 99% truncate the some partition */
-  if (type == PARTITION && rand_int(100) > 1) {
-    table_mutex.lock();
-    std::string part_name;
-    auto part_table = static_cast<Partition *>(this);
-    assert(part_table->number_of_part > 0);
-    if (part_table->part_type == Partition::HASH ||
-        part_table->part_type == Partition::KEY) {
-      part_name = std::to_string(rand_int(part_table->number_of_part - 1));
-    } else if (part_table->part_type == Partition::RANGE) {
-      part_name =
-          part_table->positions.at(rand_int(part_table->positions.size() - 1))
-              .name;
-    } else if (part_table->part_type == Partition::LIST) {
-      part_name =
-          part_table->lists.at(rand_int(part_table->lists.size() - 1)).name;
-    }
-    table_mutex.unlock();
-    execute_sql("ALTER TABLE " + name_ + pick_algorithm_lock() +
-                    ", TRUNCATE PARTITION " + part_name,
-                thd);
-  } else {
-    execute_sql("TRUNCATE TABLE " + name_, thd);
-  }
+  execute_sql("TRUNCATE TABLE " + (type == PARTITION ? pg_partition_target(this) : name_),
+              thd);
 }
 
 /* add or drop average 10% of max partitions */
 void Partition::AddDrop(Thd1 *thd) {
-  if (g_is_postgresql) {
-    if (part_type == KEY || part_type == HASH) {
-      int new_partition_count = number_of_part;
-      if (rand_int(1) == 0) {
-        if (number_of_part >= options->at(Option::MAX_PARTITIONS)->getInt()) {
-          return;
-        }
-        new_partition_count++;
-      } else {
-        if (number_of_part <= 2) {
-          return;
-        }
-        new_partition_count--;
+  if (part_type == KEY || part_type == HASH) {
+    int new_partition_count = number_of_part;
+    if (rand_int(1) == 0) {
+      if (number_of_part >= options->at(Option::MAX_PARTITIONS)->getInt()) {
+        return;
       }
-
-      std::string staging_table =
-          name_ + "_rehash_" + std::to_string(rand_int(100000, 1000));
-      bool success = execute_sql("CREATE TEMP TABLE " + staging_table +
-                                     " AS TABLE " + name_,
-                                 thd);
-
-      for (int i = 0; success && i < number_of_part; ++i) {
-        std::string child = partition_child_name(this, "p" + std::to_string(i));
-        success = execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + child,
-                              thd) &&
-                  execute_sql("DROP TABLE " + child, thd);
+      new_partition_count++;
+    } else {
+      if (number_of_part <= 2) {
+        return;
       }
+      new_partition_count--;
+    }
 
-      for (int i = 0; success && i < new_partition_count; ++i) {
-        std::string child = partition_child_name(this, "p" + std::to_string(i));
-        success = execute_sql("CREATE TABLE " + child + " PARTITION OF " + name_ +
-                                  " FOR VALUES WITH (MODULUS " +
-                                  std::to_string(new_partition_count) +
-                                  ", REMAINDER " + std::to_string(i) + ")",
-                              thd);
-      }
+    std::string staging_table =
+        name_ + "_rehash_" + std::to_string(rand_int(100000, 1000));
+    bool success = execute_sql("CREATE TEMP TABLE " + staging_table +
+                                   " AS TABLE " + name_,
+                               thd);
 
-      if (success) {
-        success = execute_sql("INSERT INTO " + name_ + " SELECT * FROM " +
-                                  staging_table,
-                              thd);
-      }
+    for (int i = 0; success && i < number_of_part; ++i) {
+      std::string child = partition_child_name(this, "p" + std::to_string(i));
+      success = execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + child,
+                            thd) &&
+                execute_sql("DROP TABLE " + child, thd);
+    }
 
-      execute_sql("DROP TABLE IF EXISTS " + staging_table, thd);
+    for (int i = 0; success && i < new_partition_count; ++i) {
+      std::string child = partition_child_name(this, "p" + std::to_string(i));
+      success = execute_sql("CREATE TABLE " + child + " PARTITION OF " + name_ +
+                                " FOR VALUES WITH (MODULUS " +
+                                std::to_string(new_partition_count) +
+                                ", REMAINDER " + std::to_string(i) + ")",
+                            thd);
+    }
 
-      if (success) {
-        table_mutex.lock();
-        number_of_part = new_partition_count;
-        table_mutex.unlock();
-      }
+    if (success) {
+      success = execute_sql("INSERT INTO " + name_ + " SELECT * FROM " +
+                                staging_table,
+                            thd);
+    }
+
+    execute_sql("DROP TABLE IF EXISTS " + staging_table, thd);
+
+    if (success) {
+      table_mutex.lock();
+      number_of_part = new_partition_count;
+      table_mutex.unlock();
+    }
+    return;
+  }
+
+  if (part_type == RANGE) {
+    table_mutex.lock();
+    if (positions.empty()) {
+      table_mutex.unlock();
       return;
     }
 
-    if (part_type == RANGE) {
-      table_mutex.lock();
-      if (positions.empty()) {
+    if (rand_int(1) == 0) {
+      if (positions.size() <= 1) {
         table_mutex.unlock();
-        return;
-      }
-
-      if (rand_int(1) == 0) {
-        if (positions.size() <= 1) {
-          table_mutex.unlock();
-          return;
-        }
-
-        auto max_part = positions.back();
-        auto prev_part = positions.at(positions.size() - 2);
-        const std::string max_child = partition_child_name(this, max_part.name);
-        const std::string prev_child = partition_child_name(this, prev_part.name);
-        const std::string lower =
-            positions.size() > 2 ? std::to_string(positions.at(positions.size() - 3).range)
-                                 : "MINVALUE";
-        table_mutex.unlock();
-
-        if (execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + max_child,
-                        thd) &&
-            execute_sql("DROP TABLE " + max_child, thd) &&
-            execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + prev_child,
-                        thd) &&
-            execute_sql("ALTER TABLE " + name_ + " ATTACH PARTITION " + prev_child +
-                            " FOR VALUES FROM (" + lower + ") TO (MAXVALUE)",
-                        thd)) {
-          table_mutex.lock();
-          positions.pop_back();
-          number_of_part--;
-          table_mutex.unlock();
-        }
         return;
       }
 
       auto max_part = positions.back();
+      auto prev_part = positions.at(positions.size() - 2);
       const std::string max_child = partition_child_name(this, max_part.name);
+      const std::string prev_child = partition_child_name(this, prev_part.name);
       const std::string lower =
-          positions.size() > 1 ? std::to_string(positions.at(positions.size() - 2).range)
+          positions.size() > 2 ? std::to_string(positions.at(positions.size() - 3).range)
                                : "MINVALUE";
       table_mutex.unlock();
 
-      std::string max_value_str =
-          read_single_value("SELECT COALESCE(MAX(ip_col), 0) FROM " + max_child, thd);
-      int max_value = 0;
-      if (!max_value_str.empty()) {
-        max_value = std::stoi(max_value_str);
-      }
-      int lower_num = lower == "MINVALUE" ? 0 : std::stoi(lower);
-      int new_upper = std::max(max_value + rand_int(10, 1), lower_num + 1);
-      std::string new_part_name = "p" + std::to_string(rand_int(1000, 100));
-      std::string new_child = partition_child_name(this, new_part_name);
-
       if (execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + max_child,
                       thd) &&
-          execute_sql("ALTER TABLE " + name_ + " ATTACH PARTITION " + max_child +
-                          " FOR VALUES FROM (" + lower + ") TO (" +
-                          std::to_string(new_upper) + ")",
+          execute_sql("DROP TABLE " + max_child, thd) &&
+          execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + prev_child,
                       thd) &&
-          execute_sql("CREATE TABLE " + new_child + " PARTITION OF " + name_ +
-                          " FOR VALUES FROM (" + std::to_string(new_upper) +
-                          ") TO (MAXVALUE)",
+          execute_sql("ALTER TABLE " + name_ + " ATTACH PARTITION " + prev_child +
+                          " FOR VALUES FROM (" + lower + ") TO (MAXVALUE)",
                       thd)) {
         table_mutex.lock();
-        positions.back().range = new_upper;
-        positions.emplace_back(new_part_name, new_upper);
-        number_of_part++;
+        positions.pop_back();
+        number_of_part--;
         table_mutex.unlock();
       }
       return;
     }
 
-    if (part_type == LIST) {
-      if (rand_int(1) == 0) {
-        table_mutex.lock();
-        if (lists.empty()) {
-          table_mutex.unlock();
-          return;
-        }
-        auto par = lists.at(rand_int(lists.size() - 1));
-        table_mutex.unlock();
-        std::string child = partition_child_name(this, par.name);
-        if (execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + child,
-                        thd) &&
-            execute_sql("DROP TABLE " + child, thd)) {
-          table_mutex.lock();
-          number_of_part--;
-          for (auto i = lists.begin(); i != lists.end(); i++) {
-            if (i->name.compare(par.name) == 0) {
-              for (auto j : i->list)
-                total_left_list.push_back(j);
-              lists.erase(i);
-              break;
-            }
-          }
-          table_mutex.unlock();
-        }
-        return;
-      }
+    auto max_part = positions.back();
+    const std::string max_child = partition_child_name(this, max_part.name);
+    const std::string lower =
+        positions.size() > 1 ? std::to_string(positions.at(positions.size() - 2).range)
+                             : "MINVALUE";
+    table_mutex.unlock();
 
-      size_t number_of_records_in_partition =
-          rand_int(options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt()) /
-          rand_int(options->at(Option::MAX_PARTITIONS)->getInt(), 1);
+    std::string max_value_str =
+        read_single_value("SELECT COALESCE(MAX(ip_col), 0) FROM " + max_child, thd);
+    int max_value = 0;
+    if (!max_value_str.empty()) {
+      max_value = std::stoi(max_value_str);
+    }
+    int lower_num = lower == "MINVALUE" ? 0 : std::stoi(lower);
+    int new_upper = std::max(max_value + rand_int(10, 1), lower_num + 1);
+    std::string new_part_name = "p" + std::to_string(rand_int(1000, 100));
+    std::string new_child = partition_child_name(this, new_part_name);
 
-      if (number_of_records_in_partition == 0)
-        number_of_records_in_partition = 1;
-
+    if (execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + max_child,
+                    thd) &&
+        execute_sql("ALTER TABLE " + name_ + " ATTACH PARTITION " + max_child +
+                        " FOR VALUES FROM (" + lower + ") TO (" +
+                        std::to_string(new_upper) + ")",
+                    thd) &&
+        execute_sql("CREATE TABLE " + new_child + " PARTITION OF " + name_ +
+                        " FOR VALUES FROM (" + std::to_string(new_upper) +
+                        ") TO (MAXVALUE)",
+                    thd)) {
       table_mutex.lock();
-      if (number_of_records_in_partition > total_left_list.size()) {
-        table_mutex.unlock();
-        return;
-      }
-
-      std::vector<int> temp_list;
-      while (temp_list.size() != number_of_records_in_partition) {
-        auto curr = rand_int(total_left_list.size() - 1);
-        int value = total_left_list.at(curr);
-        bool exists = false;
-        for (auto l : temp_list) {
-          if (l == value)
-            exists = true;
-        }
-        if (!exists)
-          temp_list.push_back(value);
-      }
-      std::string new_part_name = "p" + std::to_string(rand_int(1000, 100));
+      positions.back().range = new_upper;
+      positions.emplace_back(new_part_name, new_upper);
+      number_of_part++;
       table_mutex.unlock();
-
-      std::string sql = "CREATE TABLE " +
-                        partition_child_name(this, new_part_name) +
-                        " PARTITION OF " + name_ + " FOR VALUES IN (";
-      for (size_t i = 0; i < temp_list.size(); i++) {
-        sql += std::to_string(temp_list.at(i));
-        if (i + 1 != temp_list.size())
-          sql += ", ";
-      }
-      sql += ")";
-      if (execute_sql(sql, thd)) {
-        table_mutex.lock();
-        number_of_part++;
-        lists.emplace_back(new_part_name);
-        for (auto l : temp_list) {
-          lists.back().list.push_back(l);
-          total_left_list.erase(
-              std::remove(total_left_list.begin(), total_left_list.end(), l),
-              total_left_list.end());
-        }
-        table_mutex.unlock();
-      }
-      return;
     }
+    return;
   }
 
-  if (part_type == KEY || part_type == HASH) {
-    int new_partition =
-        rand_int(options->at(Option::MAX_PARTITIONS)->getInt()) / 10;
-    if (new_partition == 0)
-      new_partition = 1;
-
-    if (rand_int(1) == 0) {
-      if (execute_sql("ALTER TABLE " + name_ + " ADD PARTITION PARTITIONS " +
-                          std::to_string(new_partition),
-                      thd)) {
-        table_mutex.lock();
-        number_of_part += new_partition;
-        table_mutex.unlock();
-      }
-    } else {
-      if (execute_sql("ALTER TABLE " + name_ + pick_algorithm_lock() +
-                          ", COALESCE PARTITION " +
-                          std::to_string(new_partition),
-                      thd)) {
-        table_mutex.lock();
-        number_of_part -= new_partition;
-        table_mutex.unlock();
-      }
-    }
-  } else if (part_type == RANGE) {
-    /* drop partition, else add partition */
-    if (rand_int(1) == 1) {
-      table_mutex.lock();
-      if (positions.size()) {
-        auto par = positions.at(rand_int(positions.size() - 1));
-        auto part_name = par.name;
-        table_mutex.unlock();
-        if (execute_sql("ALTER TABLE " + name_ + pick_algorithm_lock() +
-                            ", DROP PARTITION " + part_name,
-                        thd)) {
-          table_mutex.lock();
-          number_of_part--;
-          for (auto i = positions.begin(); i != positions.end(); i++) {
-            if (i->name.compare(part_name) == 0) {
-              positions.erase(i);
-              break;
-            }
-          }
-          table_mutex.unlock();
-        }
-      } else
-        table_mutex.unlock();
-    } else {
-      /* add partition */
-      table_mutex.lock();
-      int first;
-      int second;
-      std::string par_name;
-      if (positions.size()) {
-        if (positions.size() > 1) {
-          size_t pst = rand_int(positions.size() - 1, 1);
-
-          if (positions.at(pst).range - positions.at(pst - 1).range <= 2) {
-            table_mutex.unlock();
-            return;
-          }
-          auto par = positions.at(pst);
-          auto prev_par = positions.at(pst - 1);
-          first = rand_int(par.range, prev_par.range);
-          second = par.range;
-          par_name = par.name;
-        } else {
-          auto par = positions.at(0);
-          first = rand_int(par.range);
-          second = par.range;
-          par_name = par.name;
-        }
-
-        std::string sql = "ALTER TABLE " + name_ + " REORGANIZE PARTITION " +
-                          par_name + " INTO ( PARTITION " + par_name +
-                          "a VALUES LESS THAN " + "(" + std::to_string(first) +
-                          "), PARTITION " + par_name + "b VALUES LESS THAN (" +
-                          std::to_string(second) + "))";
-        table_mutex.unlock();
-
-        if (execute_sql(sql, thd)) {
-          table_mutex.lock();
-          for (auto i = positions.begin(); i != positions.end(); i++) {
-            if (i->name.compare(par_name) == 0) {
-              positions.erase(i);
-              break;
-            }
-          }
-          positions.emplace_back(par_name + "a", first);
-          positions.emplace_back(par_name + "b", second);
-          std::sort(positions.begin(), positions.end(),
-                    Partition::compareRange);
-          number_of_part++;
-          table_mutex.unlock();
-        }
-      } else
-        table_mutex.unlock();
-    }
-  } else if (part_type == LIST) {
-
-    /* drop partition or add partition */
+  if (part_type == LIST) {
     if (rand_int(1) == 0) {
       table_mutex.lock();
-      assert(lists.size() > 0);
+      if (lists.empty()) {
+        table_mutex.unlock();
+        return;
+      }
       auto par = lists.at(rand_int(lists.size() - 1));
-      auto part_name = par.name;
       table_mutex.unlock();
-      if (execute_sql("ALTER TABLE " + name_ + pick_algorithm_lock() +
-                          ", DROP PARTITION " + part_name,
-                      thd)) {
+      std::string child = partition_child_name(this, par.name);
+      if (execute_sql("ALTER TABLE " + name_ + " DETACH PARTITION " + child,
+                      thd) &&
+          execute_sql("DROP TABLE " + child, thd)) {
         table_mutex.lock();
         number_of_part--;
         for (auto i = lists.begin(); i != lists.end(); i++) {
-          if (i->name.compare(part_name) == 0) {
+          if (i->name.compare(par.name) == 0) {
             for (auto j : i->list)
               total_left_list.push_back(j);
             lists.erase(i);
@@ -2147,55 +1709,57 @@ void Partition::AddDrop(Thd1 *thd) {
         }
         table_mutex.unlock();
       }
+      return;
+    }
 
-    } else {
-      /* add partition */
-      size_t number_of_records_in_partition =
-          rand_int(options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt()) /
-          rand_int(options->at(Option::MAX_PARTITIONS)->getInt(), 1);
+    size_t number_of_records_in_partition =
+        rand_int(options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt()) /
+        rand_int(options->at(Option::MAX_PARTITIONS)->getInt(), 1);
 
-      if (number_of_records_in_partition == 0)
-        number_of_records_in_partition = 1;
-      table_mutex.lock();
-      if (number_of_records_in_partition > total_left_list.size()) {
-        table_mutex.unlock();
-        return;
-      } else {
-        std::vector<int> temp_list;
-        while (temp_list.size() != number_of_records_in_partition) {
-          auto curr = rand_int(total_left_list.size() - 1);
-          int flag = false;
-          for (auto l : temp_list) {
-            if (l == curr)
-              flag = true;
-          }
-          if (flag == false)
-            temp_list.push_back(curr);
-        }
-        table_mutex.unlock();
-        std::string new_part_name = "p" + std::to_string(rand_int(1000, 100));
-        std::string sql = "ALTER TABLE " + name_ +
-                          " ADD PARTITION (PARTITION " + new_part_name +
-                          " VALUES IN (";
-        for (size_t i = 0; i < temp_list.size(); i++) {
-          sql += " " + std::to_string(temp_list.at(i));
-          if (i != temp_list.size() - 1)
-            sql += ",";
-        }
-        sql += "))";
-        if (execute_sql(sql, thd)) {
-          table_mutex.lock();
-          number_of_part++;
-          lists.emplace_back(new_part_name);
-          for (auto l : temp_list) {
-            lists.at(lists.size() - 1).list.push_back(l);
-            total_left_list.erase(
-                std::remove(total_left_list.begin(), total_left_list.end(), l),
-                total_left_list.end());
-          }
-          table_mutex.unlock();
-        }
+    if (number_of_records_in_partition == 0)
+      number_of_records_in_partition = 1;
+
+    table_mutex.lock();
+    if (number_of_records_in_partition > total_left_list.size()) {
+      table_mutex.unlock();
+      return;
+    }
+
+    std::vector<int> temp_list;
+    while (temp_list.size() != number_of_records_in_partition) {
+      auto curr = rand_int(total_left_list.size() - 1);
+      int value = total_left_list.at(curr);
+      bool exists = false;
+      for (auto l : temp_list) {
+        if (l == value)
+          exists = true;
       }
+      if (!exists)
+        temp_list.push_back(value);
+    }
+    std::string new_part_name = "p" + std::to_string(rand_int(1000, 100));
+    table_mutex.unlock();
+
+    std::string sql = "CREATE TABLE " +
+                      partition_child_name(this, new_part_name) +
+                      " PARTITION OF " + name_ + " FOR VALUES IN (";
+    for (size_t i = 0; i < temp_list.size(); i++) {
+      sql += std::to_string(temp_list.at(i));
+      if (i + 1 != temp_list.size())
+        sql += ", ";
+    }
+    sql += ")";
+    if (execute_sql(sql, thd)) {
+      table_mutex.lock();
+      number_of_part++;
+      lists.emplace_back(new_part_name);
+      for (auto l : temp_list) {
+        lists.back().list.push_back(l);
+        total_left_list.erase(
+            std::remove(total_left_list.begin(), total_left_list.end(), l),
+            total_left_list.end());
+      }
+      table_mutex.unlock();
     }
   }
 }
@@ -2269,8 +1833,8 @@ void Table::CreateDefaultColumn() {
       /* loop untill we select some column */
       while (col_type == Column::COLUMN_MAX) {
 
-        /* columns are 6:2:2:4:2:2:1 INT:FLOAT:DOUBLE:VARCHAR:CHAR:BLOB:BOOL */
-        auto prob = rand_int(19);
+        /* columns are 6:1:2:2:4:2:1:1 INT:INTEGER:FLOAT:DOUBLE:VARCHAR:CHAR:TIMESTAMP:BOOL plus JSON/BLOB */
+        auto prob = rand_int(23);
 
         /* intial columns can't be generated columns. also 50% of tables last
          * columns are virtuals */
@@ -2288,10 +1852,14 @@ void Table::CreateDefaultColumn() {
           col_type = Column::VARCHAR;
         else if (prob < 16)
           col_type = Column::CHAR;
-        else if (!no_blob_col && prob < 18)
+        else if (prob < 17)
+          col_type = Column::TIMESTAMP;
+        else if (!no_blob_col && prob < 19)
           col_type = Column::BLOB;
-        else if (prob == 19)
+        else if (prob < 21)
           col_type = Column::BOOL;
+        else if (prob < 23)
+          col_type = Column::JSON;
       }
 
       if (col_type == Column::GENERATED)
@@ -2324,8 +1892,7 @@ void Table::CreateDefaultIndex() {
 
   /* if table have few column, decrease number of indexes */
   size_t index_limit = columns_->size() < max_indexes ? columns_->size() : max_indexes;
-  if (g_is_postgresql)
-    index_limit = std::min<size_t>(index_limit, 4);
+  index_limit = std::min<size_t>(index_limit, 4);
   size_t indexes = rand_int(index_limit, 1);
 
   /* for auto-inc columns handling, we need to add auto_inc as first column */
@@ -2357,8 +1924,7 @@ void Table::CreateDefaultIndex() {
 
     number_of_columns = rand_int(
         (max_columns < number_of_columns ? max_columns : number_of_columns), 1);
-    if (g_is_postgresql)
-      number_of_columns = std::min<size_t>(number_of_columns, 4);
+    number_of_columns = std::min<size_t>(number_of_columns, 4);
 
     std::vector<int> col_pos; // position of columns
 
@@ -2368,7 +1934,7 @@ void Table::CreateDefaultIndex() {
       int current = rand_int(columns_->size() - 1);
       if (columns_->at(current)->compressed)
         continue;
-      if (g_is_postgresql && !pg_indexable_column(columns_->at(current)))
+      if (!pg_indexable_column(columns_->at(current)))
         continue;
       /* auto-inc column should be first column in auto_inc_index */
       if (auto_inc_pos != -1 && i == auto_inc_index && col_pos.size() == 0)
@@ -2398,8 +1964,7 @@ void Table::CreateDefaultIndex() {
       }
       id->AddInternalColumn(
           new Ind_col(col, column_desc)); // desc is set as true
-      if (g_is_postgresql &&
-          (id->columns_->size() >= 4 || pg_index_total_width(id) > 192)) {
+      if (id->columns_->size() >= 4 || pg_index_total_width(id) > 192) {
         delete id->columns_->back();
         id->columns_->pop_back();
         break;
@@ -2440,79 +2005,12 @@ Table *Table::table_id(TABLE_TYPES type, int id) {
       options->at(Option::EXACT_INITIAL_RECORDS)->getBool()
           ? options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt()
           : rand_int(options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt());
-  static auto no_encryption = opt_bool(NO_ENCRYPTION);
-
-  if (g_is_postgresql) {
-    table->storage_engine.clear();
-    table->storage_layout.clear();
-    table->storage_tablespace.clear();
-    table->storage_compression.clear();
-    table->storage_encryption = "N";
-    table->storage_block_size = 0;
-  }
-
-  /* temporary table on 8.0 can't have key block size */
-  if (!g_is_postgresql && !(server_version() >= 80000 && type == TEMPORARY)) {
-    if (g_key_block_size.size() > 0)
-      table->storage_block_size =
-          g_key_block_size[rand_int(g_key_block_size.size() - 1)];
-
-    if (table->storage_block_size > 0 && rand_int(2) == 0) {
-      table->storage_layout = "COMPRESSED";
-    }
-
-    if (table->storage_block_size == 0 && g_row_format.size() > 0)
-      table->storage_layout = g_row_format[rand_int(g_row_format.size() - 1)];
-  }
-
-  /* with more number of tablespace there are more chances to have table in
-   * tablespaces */
-  static int tbs_count = opt_int(NUMBER_OF_GENERAL_TABLESPACE);
-
-  /* partition and temporary tables don't have tablespaces */
-  if (!g_is_postgresql && table->type == PARTITION && !no_encryption) {
-    table->storage_encryption = g_encryption[rand_int(g_encryption.size() - 1)];
-  } else if (table->type != TEMPORARY && !no_encryption) {
-    int rand_index = rand_int(g_encryption.size() - 1);
-    if (g_encryption.at(rand_index) == "Y" ||
-        g_encryption.at(rand_index) == "N") {
-      if (g_tablespace.size() > 0 && rand_int(tbs_count) != 0) {
-        table->storage_tablespace = g_tablespace[rand_int(g_tablespace.size() - 1)];
-        if (table->storage_tablespace.substr(table->storage_tablespace.size() - 2, 2)
-                .compare("_e") == 0)
-          table->storage_encryption = "Y";
-        table->storage_layout.clear();
-        if (g_innodb_page_size > INNODB_16K_PAGE_SIZE ||
-            table->storage_tablespace.compare("innodb_system") == 0 ||
-            stoi(table->storage_tablespace.substr(3, 2)) == g_innodb_page_size)
-          table->storage_block_size = 0;
-        else
-          table->storage_block_size = std::stoi(table->storage_tablespace.substr(3, 2));
-      }
-    } else
-      table->storage_encryption = g_encryption.at(rand_index);
-  }
-
-  if (!g_is_postgresql && encrypted_temp_tables && table->type == TEMPORARY)
-    table->storage_encryption = 'Y';
-
-  if (!g_is_postgresql && encrypted_sys_tablelspaces &&
-      table->storage_tablespace.compare("innodb_system") == 0) {
-    table->storage_encryption = 'Y';
-  }
-
-  /* 25 % tables are compress */
-  if (!g_is_postgresql && table->type != TEMPORARY &&
-      table->storage_tablespace.empty() and
-      rand_int(3) == 1 && g_compression.size() > 0) {
-    table->storage_compression = g_compression[rand_int(g_compression.size() - 1)];
-    table->storage_layout.clear();
-    table->storage_block_size = 0;
-  }
-
-  static auto engine = options->at(Option::ENGINE)->getString();
-  if (!g_is_postgresql)
-    table->storage_engine = engine;
+  table->storage_engine.clear();
+  table->storage_layout.clear();
+  table->storage_tablespace.clear();
+  table->storage_compression.clear();
+  table->storage_encryption = "N";
+  table->storage_block_size = 0;
 
   /* If indexes are disabled, also disable auto_inc */
   if (!options->at(Option::INDEXES)->getInt())
@@ -2566,70 +2064,12 @@ std::string Table::definition(bool with_index) {
     }
   }
 
-  if (with_index) {
-    if (!g_is_postgresql && indexes_->size() > 0) {
-      for (auto id : *indexes_) {
-        def += id->definition() + ", ";
-      }
-      if (type == FK) {
-        auto fk = static_cast<FK_table *>(this);
-        def += " FOREIGN KEY (ifk_col) REFERENCES " + fk->parent->name_ +
-               " (ipkey) ";
-        def += " ON UPDATE " + fk->enumToString(fk->on_update) + " ON DELETE " +
-            fk->enumToString(fk->on_delete);
-        def += ", ";
-      }
-    }
-
-  } else {
-    /* only load autoinc */
-    if (!g_is_postgresql && indexes_->size() > 0) {
-      def += indexes_->at(auto_inc_index)->definition() + ", ";
-    }
-  }
+  (void)with_index;
 
   def.erase(def.length() - 2);
 
   def += " )";
-  static auto no_encryption = opt_bool(NO_ENCRYPTION);
-  bool keyring_key_encrypt_flag = 0;
-
-  if (!g_is_postgresql && !no_encryption && type != TEMPORARY) {
-    if (storage_encryption == "Y" || storage_encryption == "N")
-      def += " ENCRYPTION='" + storage_encryption + "'";
-    else if (storage_encryption == "KEYRING") {
-      keyring_key_encrypt_flag = 1;
-      switch (rand_int(2)) {
-      case 0:
-        def += "ENCRYPTION='KEYRING'";
-        break;
-      case 1:
-        def += " ENCRYPTION_KEY_ID=" + std::to_string(rand_int(9));
-        break;
-      case 2:
-        def += " ENCRYPTION='KEYRING' ENCRYPTION_KEY_ID=" +
-               std::to_string(rand_int(9));
-        break;
-      }
-    }
-  }
-
-  if (!g_is_postgresql && !storage_compression.empty())
-    def += " COMPRESSION='" + storage_compression + "'";
-
-  if (!g_is_postgresql && !storage_tablespace.empty() && !keyring_key_encrypt_flag)
-    def += " TABLESPACE=" + storage_tablespace;
-
-  if (!g_is_postgresql && storage_block_size > 1)
-    def += " KEY_BLOCK_SIZE=" + std::to_string(storage_block_size);
-
-  if (!g_is_postgresql && storage_layout.size() > 0)
-    def += " ROW_FORMAT=" + storage_layout;
-
-  if (!g_is_postgresql && !storage_engine.empty())
-    def += " ENGINE=" + storage_engine;
-
-  if (g_is_postgresql && type == PARTITION) {
+  if (type == PARTITION) {
     auto par = static_cast<Partition *>(this);
     auto part_type = par->part_type == Partition::KEY ? Partition::HASH
                                                       : par->part_type;
@@ -2643,51 +2083,6 @@ std::string Table::definition(bool with_index) {
     case Partition::HASH:
     case Partition::KEY:
       def += " PARTITION BY HASH (ip_col)";
-      break;
-    }
-  } else if (!g_is_postgresql && type == PARTITION) {
-    auto par = static_cast<Partition *>(this);
-    def += " PARTITION BY " + par->get_part_type() + " (ip_col)";
-    switch (par->part_type) {
-    case Partition::HASH:
-    case Partition::KEY:
-      def += " PARTITIONS " + std::to_string(par->number_of_part);
-      break;
-    case Partition::RANGE:
-      def += "(";
-      for (size_t i = 0; i < par->positions.size(); i++) {
-        std::string range;
-        if (i == par->positions.size() - 1)
-          range = "MAXVALUE";
-        else
-          range = std::to_string(par->positions[i].range);
-
-        def += " PARTITION p" + std::to_string(i) + " VALUES LESS THAN (" +
-               range + ")";
-
-        if (i == par->positions.size() - 1)
-          def += ")";
-        else
-          def += ",";
-      }
-      break;
-    case Partition::LIST:
-      def += "(";
-      for (size_t i = 0; i < par->lists.size(); i++) {
-        def += " PARTITION " + par->lists.at(i).name + " VALUES IN (";
-        auto list = par->lists.at(i).list;
-        for (size_t j = 0; j < list.size(); j++) {
-          def += std::to_string(list.at(j));
-          if (j == list.size() - 1)
-            def += ")";
-          else
-            def += ",";
-        }
-        if (i == par->lists.size() - 1)
-          def += ")";
-        else
-          def += ",";
-      }
       break;
     }
   }
@@ -2856,37 +2251,19 @@ bool execute_sql(const std::string &sql, Thd1 *thd) {
 }
 
 void Table::SetEncryption(Thd1 *thd) {
-  if (g_is_postgresql)
-    return;
-  std::string sql = "ALTER TABLE " + name_ + " ENCRYPTION = '";
-  std::string enc = g_encryption[rand_int(g_encryption.size() - 1)];
-  sql += enc + "'" + "," + pick_algorithm_lock();
-  if (execute_sql(sql, thd)) {
-    table_mutex.lock();
-    storage_encryption = enc;
-    table_mutex.unlock();
-  }
+  (void)thd;
+  return;
 }
 
 // todo pick relevant table //
 void Table::SetTableCompression(Thd1 *thd) {
-  if (g_is_postgresql)
-    return;
-  std::string sql = "ALTER TABLE " + name_ + " COMPRESSION= '";
-  std::string comp = g_compression[rand_int(g_compression.size() - 1)];
-  sql += comp + "'" + "," + pick_algorithm_lock();
-  if (execute_sql(sql, thd)) {
-    table_mutex.lock();
-    storage_compression = comp;
-    table_mutex.unlock();
-  }
+  (void)thd;
+  return;
 }
 
 void Table::SetAlterEngine(Thd1 *thd) {
-  if (g_is_postgresql)
-    return;
-  std::string sql = "ALTER TABLE " + name_ + " ENGINE=InnoDB," + pick_algorithm_lock();
-  execute_sql(sql, thd);
+  (void)thd;
+  return;
 }
 
 // todo pick relevent table//
@@ -2910,7 +2287,9 @@ void Table::ModifyColumn(Thd1 *thd) {
     case Column::DOUBLE:
     case Column::INT:
     case Column::INTEGER:
+    case Column::TIMESTAMP:
     case Column::BOOL:
+    case Column::JSON:
       col = col1;
       col_pos = static_cast<size_t>(std::distance(columns_->begin(),
                                                   std::find(columns_->begin(),
@@ -2922,14 +2301,12 @@ void Table::ModifyColumn(Thd1 *thd) {
       col->mutex.lock(); // lock column so no one can modify it //
       break;
     case Column::GENERATED:
-      if (g_is_postgresql) {
-        col = col1;
-        col_pos = static_cast<size_t>(std::distance(columns_->begin(),
-                                                    std::find(columns_->begin(),
-                                                              columns_->end(),
-                                                              col1)));
-        col->mutex.lock();
-      }
+      col = col1;
+      col_pos = static_cast<size_t>(std::distance(columns_->begin(),
+                                                  std::find(columns_->begin(),
+                                                            columns_->end(),
+                                                            col1)));
+      col->mutex.lock();
       break;
     case Column::COLUMN_MAX:
       break;
@@ -2947,69 +2324,49 @@ void Table::ModifyColumn(Thd1 *thd) {
   if (col->auto_increment == true and rand_int(5) == 0)
     col->auto_increment = false;
 
-  if (col->compressed == true and rand_int(4) == 0)
-    col->compressed = false;
-  else if (options->at(Option::NO_COLUMN_COMPRESSION)->getBool() == false &&
-           (col->type_ == Column::BLOB || col->type_ == Column::GENERATED ||
-            col->type_ == Column::VARCHAR))
-    col->compressed = true;
+  col->compressed = false;
 
-  if (g_is_postgresql) {
-    if (col->type_ == Column::GENERATED) {
-      auto *new_col = new Generated_Column(col->name_, this);
-      new_col->name_ = col->name_;
-      bool success = execute_sql("ALTER TABLE " + name_ + " DROP COLUMN " +
-                                     col->name_ + ", ADD COLUMN " +
-                                     new_col->definition(),
-                                 thd);
-      if (success) {
-        auto *old_col = col;
-        table_mutex.lock();
-        columns_->at(col_pos) = new_col;
-        table_mutex.unlock();
-        old_col->mutex.unlock();
-        delete old_col;
-      } else {
-        delete new_col;
-        col->mutex.unlock();
-      }
-      return;
+  if (col->type_ == Column::GENERATED) {
+    auto *new_col = new Generated_Column(col->name_, this);
+    new_col->name_ = col->name_;
+    bool success = execute_sql("ALTER TABLE " + name_ + " DROP COLUMN " +
+                                   col->name_ + ", ADD COLUMN " +
+                                   new_col->definition(),
+                               thd);
+    if (success) {
+      auto *old_col = col;
+      table_mutex.lock();
+      columns_->at(col_pos) = new_col;
+      table_mutex.unlock();
+      old_col->mutex.unlock();
+      delete old_col;
+    } else {
+      delete new_col;
+      col->mutex.unlock();
     }
-
-    bool success = true;
-    std::string sql = "ALTER TABLE " + name_ + " ALTER COLUMN " + col->name_ +
-                      " TYPE " + col->type_clause();
-    success = execute_sql(sql, thd);
-
-    if (success && auto_increment != col->auto_increment) {
-      if (col->auto_increment) {
-        success = execute_sql("ALTER TABLE " + name_ + " ALTER COLUMN " +
-                                  col->name_ +
-                                  " ADD GENERATED BY DEFAULT AS IDENTITY",
-                              thd);
-      } else {
-        success = execute_sql("ALTER TABLE " + name_ + " ALTER COLUMN " +
-                                  col->name_ + " DROP IDENTITY IF EXISTS",
-                              thd);
-      }
-    }
-
-    /* if not successful rollback */
-    if (!success) {
-      col->length = length;
-      col->auto_increment = auto_increment;
-      col->compressed = compressed;
-    }
-
-    col->mutex.unlock();
     return;
   }
 
-  std::string sql = "ALTER TABLE " + name_ + " MODIFY COLUMN ";
-  sql += " " + col->definition() + "," + pick_algorithm_lock();
+  bool success = true;
+  std::string sql = "ALTER TABLE " + name_ + " ALTER COLUMN " + col->name_ +
+                    " TYPE " + col->type_clause();
+  success = execute_sql(sql, thd);
+
+  if (success && auto_increment != col->auto_increment) {
+    if (col->auto_increment) {
+      success = execute_sql("ALTER TABLE " + name_ + " ALTER COLUMN " +
+                                col->name_ +
+                                " ADD GENERATED BY DEFAULT AS IDENTITY",
+                            thd);
+    } else {
+      success = execute_sql("ALTER TABLE " + name_ + " ALTER COLUMN " +
+                                col->name_ + " DROP IDENTITY IF EXISTS",
+                            thd);
+    }
+  }
 
   /* if not successful rollback */
-  if (!execute_sql(sql, thd)) {
+  if (!success) {
     col->length = length;
     col->auto_increment = auto_increment;
     col->compressed = compressed;
@@ -3038,10 +2395,6 @@ void Table::DropColumn(Thd1 *thd) {
   }
 
   std::string sql = "ALTER TABLE " + name_ + " DROP COLUMN " + name;
-  if (!g_is_postgresql) {
-    sql += ",";
-    sql += pick_algorithm_lock();
-  }
   table_mutex.unlock();
 
   if (execute_sql(sql, thd)) {
@@ -3108,9 +2461,9 @@ void Table::AddColumn(Thd1 *thd) {
     use_virtual = false;
 
   while (col_type == Column::COLUMN_MAX) {
-    /* new columns are in ratio of 3:2:1:1:1:1
-     * INT:VARCHAR:CHAR:BLOB:BOOL:GENERATD */
-    auto prob = rand_int(8);
+    /* new columns are in ratio of 2:2:2:1:1:1:1:1
+     * INT:VARCHAR:CHAR:BOOL:GENERATED:TIMESTAMP:JSON:BLOB */
+    auto prob = rand_int(10);
     if (prob < 1)
       col_type = Column::INTEGER;
     else if (prob < 3)
@@ -3123,7 +2476,11 @@ void Table::AddColumn(Thd1 *thd) {
       col_type = Column::GENERATED;
     else if (prob < 8)
       col_type = Column::BOOL;
-    else if (prob < 9 && use_blob)
+    else if (prob < 9)
+      col_type = Column::TIMESTAMP;
+    else if (prob < 10)
+      col_type = Column::JSON;
+    else if (prob < 11 && use_blob)
       col_type = Column::BLOB;
   }
 
@@ -3153,31 +2510,7 @@ void Table::AddColumn(Thd1 *thd) {
 
   sql += tc->definition();
 
-  std::string algo;
-  std::string algorithm_lock = pick_algorithm_lock(&algo);
-
-  bool has_virtual_column = false;
-  /* if a table has virtual column, We can not add AFTER */
-  for (auto col : *columns_) {
-    if (col->type_ == Column::GENERATED) {
-      has_virtual_column = true;
-      break;
-    }
-  }
-  if (col_type == Column::GENERATED)
-    has_virtual_column = true;
-
-  if (!g_is_postgresql && (((algo == "INSTANT" || algo == "INPLACE") &&
-        has_virtual_column == false && storage_block_size == 1) ||
-       (algo != "INSTANT" && algo != "INPLACE")) &&
-      rand_int(10, 1) <= 7) {
-    sql += " AFTER " + columns_->at(rand_int(columns_->size() - 1))->name_;
-  }
-
-  if (!g_is_postgresql) {
-    sql += ",";
-    sql += algorithm_lock;
-  }
+  (void)pick_algorithm_lock;
 
   table_mutex.unlock();
 
@@ -3206,9 +2539,7 @@ void Table::DropIndex(Thd1 *thd) {
   if (indexes_ != nullptr && indexes_->size() > 0) {
     auto index = indexes_->at(rand_int(indexes_->size() - 1));
     auto name = index->name_;
-    std::string sql = g_is_postgresql ? "DROP INDEX IF EXISTS " + name
-                                      : "ALTER TABLE " + name_ + " DROP INDEX " +
-                                            name + "," + pick_algorithm_lock();
+    std::string sql = "DROP INDEX IF EXISTS " + name;
     table_mutex.unlock();
     if (execute_sql(sql, thd)) {
       table_mutex.lock();
@@ -3249,8 +2580,7 @@ void Table::AddIndex(Thd1 *thd) {
   /* number of columns to be added */
   int no_of_columns = rand_int(
       (max_columns < columns_->size() ? max_columns : columns_->size()), 1);
-  if (g_is_postgresql)
-    no_of_columns = std::min(no_of_columns, 4);
+  no_of_columns = std::min(no_of_columns, 4);
 
   std::vector<int> col_pos; // position of columns
 
@@ -3258,7 +2588,7 @@ void Table::AddIndex(Thd1 *thd) {
   size_t attempts = 0;
   while (col_pos.size() < (size_t)no_of_columns && attempts++ < columns_->size() * 8) {
     int current = rand_int(columns_->size() - 1);
-    if (g_is_postgresql && !pg_indexable_column(columns_->at(current)))
+    if (!pg_indexable_column(columns_->at(current)))
       continue;
     /* auto-inc column should be first column in auto_inc_index */
     bool already_added = false;
@@ -3280,8 +2610,7 @@ void Table::AddIndex(Thd1 *thd) {
                         : false; // 33 % are desc //
     }
     id->AddInternalColumn(new Ind_col(col, column_desc)); // desc is set as true
-    if (g_is_postgresql &&
-        (id->columns_->size() >= 4 || pg_index_total_width(id) > 192)) {
+    if (id->columns_->size() >= 4 || pg_index_total_width(id) > 192) {
       delete id->columns_->back();
       id->columns_->pop_back();
       break;
@@ -3294,31 +2623,7 @@ void Table::AddIndex(Thd1 *thd) {
     return;
   }
 
-  if (g_is_postgresql) {
-    std::string sql = create_index_sql(this, id);
-    table_mutex.unlock();
-
-    if (execute_sql(sql, thd)) {
-      table_mutex.lock();
-      auto do_not_add = false;
-      for (auto ind : *indexes_) {
-        if (ind->name_.compare(id->name_) == 0)
-          do_not_add = true;
-      }
-      if (!do_not_add)
-        AddInternalIndex(id);
-      else
-        delete id;
-
-      table_mutex.unlock();
-    } else {
-      delete id;
-    }
-    return;
-  }
-
-  std::string sql = "ALTER TABLE " + name_ + " ADD " + id->definition() + ",";
-  sql += pick_algorithm_lock();
+  std::string sql = create_index_sql(this, id);
   table_mutex.unlock();
 
   if (execute_sql(sql, thd)) {
@@ -3342,39 +2647,8 @@ void Table::AddIndex(Thd1 *thd) {
 void Table::DeleteAllRows(Thd1 *thd) {
   std::string sql = "DELETE FROM " + name_;
   if (type == PARTITION && rand_int(100) < 98) {
-    if (g_is_postgresql) {
-      execute_sql("DELETE FROM " + pg_partition_target(this), thd);
-      return;
-    }
-    sql += " PARTITION (";
-    auto part = static_cast<Partition *>(this);
-    assert(part->number_of_part > 0);
-    table_mutex.lock();
-    if (part->part_type == Partition::RANGE) {
-      sql += part->positions.at(rand_int(part->positions.size() - 1)).name;
-      /* below randomness is added intentionally */
-      for (int i = 0; i < rand_int(part->positions.size()); i++) {
-        if (rand_int(5) == 1)
-          sql += "," +
-                 part->positions.at(rand_int(part->positions.size() - 1)).name;
-      }
-    } else if (part->part_type == Partition::KEY ||
-               part->part_type == Partition::HASH) {
-      sql += "p" + std::to_string(rand_int(part->number_of_part - 1));
-      for (int i = 0; i < rand_int(part->number_of_part); i++) {
-        if (rand_int(2) == 1)
-          sql += ", p" + std::to_string(rand_int(part->number_of_part - 1));
-      }
-    } else if (part->part_type == Partition::LIST) {
-      sql += part->lists.at(rand_int(part->lists.size() - 1)).name;
-      /* below randomness is added intentionally */
-      for (int i = 0; i < rand_int(part->lists.size()); i++) {
-        if (rand_int(5) == 1)
-          sql += "," + part->lists.at(rand_int(part->lists.size() - 1)).name;
-      }
-    }
-    table_mutex.unlock();
-    sql += ")";
+    execute_sql("DELETE FROM " + pg_partition_target(this), thd);
+    return;
   }
   execute_sql(sql, thd);
 }
@@ -3382,37 +2656,8 @@ void Table::DeleteAllRows(Thd1 *thd) {
 void Table::SelectAllRow(Thd1 *thd) {
   std::string sql = "SELECT * FROM " + name_;
   if (type == PARTITION && rand_int(100) < 98) {
-    if (g_is_postgresql) {
-      execute_sql("SELECT * FROM " + pg_partition_target(this), thd);
-      return;
-    }
-    sql += " PARTITION (";
-    auto part = static_cast<Partition *>(this);
-    assert(part->number_of_part > 0);
-    table_mutex.lock();
-    if (part->part_type == Partition::RANGE) {
-      sql += part->positions.at(rand_int(part->positions.size() - 1)).name;
-      for (int i = 0; i < rand_int(part->positions.size()); i++) {
-        if (rand_int(2) == 1)
-          sql += "," +
-                 part->positions.at(rand_int(part->positions.size() - 1)).name;
-      }
-    } else if (part->part_type == Partition::KEY ||
-               part->part_type == Partition::HASH) {
-      sql += "p" + std::to_string(rand_int(part->number_of_part - 1));
-      for (int i = 0; i < rand_int(part->number_of_part); i++) {
-        if (rand_int(2) == 1)
-          sql += ", p" + std::to_string(rand_int(part->number_of_part - 1));
-      }
-    } else if (part->part_type == Partition::LIST) {
-      sql += part->lists.at(rand_int(part->lists.size() - 1)).name;
-      for (int i = 0; i < rand_int(part->lists.size()); i++) {
-        if (rand_int(2) == 1)
-          sql += "," + part->lists.at(rand_int(part->lists.size() - 1)).name;
-      }
-    }
-    sql += ")";
-    table_mutex.unlock();
+    execute_sql("SELECT * FROM " + pg_partition_target(this), thd);
+    return;
   }
   execute_sql(sql, thd);
 }
@@ -3432,14 +2677,11 @@ void Table::IndexRename(Thd1 *thd) {
       new_name = name.substr(0, name.length() - s);
     else
       new_name = name + new_name;
-    if (g_is_postgresql && index_name_exists(this, new_name)) {
+    if (index_name_exists(this, new_name)) {
       table_mutex.unlock();
       return;
     }
-    std::string sql = g_is_postgresql
-                          ? "ALTER INDEX " + name + " RENAME TO " + new_name
-                          : "ALTER TABLE " + name_ + " RENAME INDEX " + name +
-                                " To " + new_name + "," + pick_algorithm_lock();
+    std::string sql = "ALTER INDEX " + name + " RENAME TO " + new_name;
     table_mutex.unlock();
     if (execute_sql(sql, thd)) {
       table_mutex.lock();
@@ -3465,10 +2707,6 @@ void Table::ColumnRename(Thd1 *thd) {
     new_name = name + new_name;
   std::string sql =
       "ALTER TABLE " + name_ + " RENAME COLUMN " + name + " To " + new_name;
-  if (!g_is_postgresql) {
-    sql += ",";
-    sql += pick_algorithm_lock();
-  }
   table_mutex.unlock();
   if (execute_sql(sql, thd)) {
     table_mutex.lock();
@@ -3507,6 +2745,7 @@ void Table::DeleteRandomRow(Thd1 *thd) {
           where = col_pos;
         break;
       case Column::INT:
+      case Column::TIMESTAMP:
       case Column::FLOAT:
       case Column::DOUBLE:
       case Column::VARCHAR:
@@ -3514,6 +2753,10 @@ void Table::DeleteRandomRow(Thd1 *thd) {
       case Column::BLOB:
       case Column::GENERATED:
         where = col_pos;
+        break;
+      case Column::JSON:
+        if (rand_int(1000) < 50)
+          where = col_pos;
         break;
       case Column::INTEGER:
         if (rand_int(1000) < 10)
@@ -3526,25 +2769,8 @@ void Table::DeleteRandomRow(Thd1 *thd) {
   }
   std::string sql = "DELETE FROM " + name_;
 
-  if (type == PARTITION && rand_int(10) < 2) {
-    if (g_is_postgresql) {
-      sql = "DELETE FROM " + pg_partition_target(this);
-    } else {
-      sql += " PARTITION (";
-      auto part = static_cast<Partition *>(this);
-      assert(part->number_of_part > 0);
-      if (part->part_type == Partition::RANGE) {
-        sql += part->positions.at(rand_int(part->positions.size() - 1)).name;
-      } else if (part->part_type == Partition::KEY ||
-                 part->part_type == Partition::HASH) {
-        sql += "p" + std::to_string(rand_int(part->number_of_part - 1));
-      } else if (part->part_type == Partition::LIST) {
-        sql += part->lists.at(rand_int(part->lists.size() - 1)).name;
-      }
-
-      sql += ")";
-    }
-  }
+  if (type == PARTITION && rand_int(10) < 2)
+    sql = "DELETE FROM " + pg_partition_target(this);
   sql += " WHERE " + columns_->at(where)->name_;
 
   auto prob = rand_int(100);
@@ -3580,6 +2806,7 @@ void Table::SelectRandomRow(Thd1 *thd) {
         where = col_pos;
       break;
     case Column::INT:
+    case Column::TIMESTAMP:
     case Column::FLOAT:
     case Column::DOUBLE:
     case Column::VARCHAR:
@@ -3587,6 +2814,10 @@ void Table::SelectRandomRow(Thd1 *thd) {
     case Column::BLOB:
     case Column::GENERATED:
       where = col_pos;
+      break;
+    case Column::JSON:
+      if (rand_int(1000) < 50)
+        where = col_pos;
       break;
     case Column::INTEGER:
       if (rand_int(1000) < 10)
@@ -3599,25 +2830,8 @@ void Table::SelectRandomRow(Thd1 *thd) {
   std::string sql = "SELECT * FROM " + name_;
 
   /* if it partition table randomly pick some partition */
-  if (type == PARTITION && rand_int(10) < 2) {
-    if (g_is_postgresql) {
-      sql = "SELECT * FROM " + pg_partition_target(this);
-    } else {
-      sql += " PARTITION (";
-      auto part = static_cast<Partition *>(this);
-      assert(part->number_of_part > 0);
-      if (part->part_type == Partition::RANGE) {
-        sql += part->positions.at(rand_int(part->positions.size() - 1)).name;
-      } else if (part->part_type == Partition::KEY ||
-                 part->part_type == Partition::HASH) {
-        sql += "p" + std::to_string(rand_int(part->number_of_part - 1));
-      } else if (part->part_type == Partition::LIST) {
-        sql += part->lists.at(rand_int(part->lists.size() - 1)).name;
-      }
-
-      sql += ")";
-    }
-  }
+  if (type == PARTITION && rand_int(10) < 2)
+    sql = "SELECT * FROM " + pg_partition_target(this);
 
   sql += " WHERE " + columns_->at(where)->name_;
   auto prob = rand_int(100);
@@ -3664,6 +2878,7 @@ void Table::UpdateRandomROW(Thd1 *thd) {
         where = col_pos;
       break;
     case Column::INT:
+    case Column::TIMESTAMP:
     case Column::FLOAT:
     case Column::DOUBLE:
     case Column::VARCHAR:
@@ -3671,6 +2886,10 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     case Column::BLOB:
     case Column::GENERATED:
       where = col_pos;
+      break;
+    case Column::JSON:
+      if (rand_int(1000) < 50)
+        where = col_pos;
       break;
     case Column::INTEGER:
       if (rand_int(1000) < 10)
@@ -3682,29 +2901,14 @@ void Table::UpdateRandomROW(Thd1 *thd) {
   }
   std::string sql = "UPDATE " + name_;
 
-  if (type == PARTITION && rand_int(10) < 2) {
-    if (g_is_postgresql) {
-      sql = "UPDATE " + pg_partition_target(this);
-    } else {
-      sql += " PARTITION (";
-      auto part = static_cast<Partition *>(this);
-      assert(part->number_of_part > 0);
-      if (part->part_type == Partition::RANGE) {
-        sql += part->positions.at(rand_int(part->positions.size() - 1)).name;
-      } else if (part->part_type == Partition::KEY ||
-                 part->part_type == Partition::HASH) {
-        sql += "p" + std::to_string(rand_int(part->number_of_part - 1));
-      }
-      if (part->part_type == Partition::LIST) {
-        sql += part->lists.at(rand_int(part->lists.size() - 1)).name;
-      }
+  if (type == PARTITION && rand_int(10) < 2)
+    sql = "UPDATE " + pg_partition_target(this);
 
-      sql += ")";
-    }
-  }
-
-  sql += " SET " + columns_->at(set)->name_ + " = " +
-         columns_->at(set)->rand_value() + " WHERE ";
+  auto set_value =
+      columns_->at(set)->name_.find("fk_col") != std::string::npos
+          ? fk_reference_value_expr(this)
+          : columns_->at(set)->rand_value();
+  sql += " SET " + columns_->at(set)->name_ + " = " + set_value + " WHERE ";
 
   /* if tables has pkey try to use that in where clause for 50% cases */
   for (size_t i = 0; i < columns_->size(); i++) {
@@ -3771,9 +2975,6 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
     is_list_partition = true;
   }
 
-  if (is_list_partition && !g_is_postgresql)
-    prepare_sql += "IGNORE ";
-
   prepare_sql += "INTO " + name_ + " (";
 
   assert(number_of_initial_records <=
@@ -3802,7 +3003,7 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
       } else if (column->primary_key) {
         value += std::to_string(thd->unique_keys.at(records));
       } else if (column->auto_increment == true) {
-        value += g_is_postgresql ? "DEFAULT" : "NULL";
+        value += "DEFAULT";
       } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
         /* for list partition we insert only maximum possible value
          * todo modify rand_value to return list parititon range */
@@ -3839,21 +3040,21 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
 void Table::InsertRandomRow(Thd1 *thd) {
   table_mutex.lock();
   std::string vals = "";
-  const bool use_replace = !g_is_postgresql && rand_int(3) != 0;
-  std::string sql = (use_replace ? "REPLACE" : "INSERT") + std::string(" INTO ") +
-                    name_ + "  ( ";
+  std::string sql = "INSERT INTO " + name_ + "  ( ";
   std::vector<std::string> column_names;
   std::vector<std::string> value_exprs;
   for (auto &column : *columns_) {
     sql += column->name_ + " ,";
     column_names.push_back(column->name_);
     std::string val;
-    if (column->type_ == Column::COLUMN_TYPES::GENERATED)
+    if (column->name_.find("fk_col") != std::string::npos)
+      val = fk_reference_value_expr(this);
+    else if (column->type_ == Column::COLUMN_TYPES::GENERATED)
       val = "default";
     else
       val = column->rand_value();
     if (column->auto_increment == true && rand_int(100) < 10)
-      val = g_is_postgresql ? "DEFAULT" : "NULL";
+      val = "DEFAULT";
     vals += " " + val + ",";
     value_exprs.push_back(val);
   }
@@ -3865,7 +3066,7 @@ void Table::InsertRandomRow(Thd1 *thd) {
   sql += ") VALUES(" + vals;
   sql += " )";
 
-  if (g_is_postgresql && rand_int(3) != 0) {
+  if (rand_int(3) != 0) {
     auto pk_columns = primary_key_columns(this);
     if (!pk_columns.empty()) {
       sql += " ON CONFLICT (";
@@ -3936,13 +3137,8 @@ void alter_tablespace_encryption(Thd1 *thd) {
 
 /* alter table discard tablespace */
 void Table::alter_discard_tablespace(Thd1 *thd) {
-  if (g_is_postgresql)
-    return;
-  std::string sql = "ALTER TABLE " + name_ + " DISCARD TABLESPACE";
-  execute_sql(sql, thd);
-  /* Discarding the tablespace makes the table unusable, hence recreate the
-   * table */
-  DropCreate(thd);
+  (void)thd;
+  return;
 }
 
 /* alter instance enable disable redo logging */
@@ -4186,81 +3382,6 @@ void create_in_memory_data() {
   g_row_format.clear();
   g_key_block_size.clear();
   g_undo_tablespace.clear();
-
-  if (g_is_postgresql) {
-    return;
-  }
-
-  /* Adjust the tablespaces */
-  if (!options->at(Option::NO_TABLESPACE)->getBool()) {
-    g_tablespace = {"tab02k", "tab04k"};
-    g_tablespace.push_back("innodb_system");
-    if (g_innodb_page_size >= INNODB_8K_PAGE_SIZE) {
-      g_tablespace.push_back("tab08k");
-    }
-    if (g_innodb_page_size >= INNODB_16K_PAGE_SIZE) {
-      g_tablespace.push_back("tab16k");
-    }
-    if (g_innodb_page_size >= INNODB_32K_PAGE_SIZE) {
-      g_tablespace.push_back("tab32k");
-    }
-    if (g_innodb_page_size >= INNODB_64K_PAGE_SIZE) {
-      g_tablespace.push_back("tab64k");
-    }
-
-    /* add addtional tablespace */
-    auto tbs_count = opt_int(NUMBER_OF_GENERAL_TABLESPACE);
-    if (tbs_count > 1) {
-      auto current_size = g_tablespace.size();
-      for (size_t i = 0; i < current_size; i++) {
-        for (int j = 1; j <= tbs_count; j++)
-          if (g_tablespace[i].compare("innodb_system") == 0)
-            continue;
-          else
-            g_tablespace.push_back(g_tablespace[i] + std::to_string(j));
-      }
-    }
-  }
-
-  /* set some of tablespace encrypt */
-  if (!options->at(Option::NO_ENCRYPTION)->getBool() &&
-      !(strcmp(FORK, "MySQL") == 0 && server_version() < 80000)) {
-    int i = 0;
-    for (auto &tablespace : g_tablespace) {
-      if (i++ % 2 == 0 &&
-          tablespace.compare("innodb_system") != 0) // alternate tbs are encrypt
-        tablespace += "_e";
-    }
-  }
-
-  std::string row_format = opt_string(ROW_FORMAT);
-
-  if (row_format.compare("all") == 0 &&
-      options->at(Option::NO_TABLE_COMPRESSION)->getInt() == true)
-    row_format = "uncompressed";
-
-  if (row_format.compare("uncompressed") == 0) {
-    g_row_format = {"DYNAMIC", "REDUNDANT"};
-  } else if (row_format.compare("all") == 0) {
-    g_row_format = {"DYNAMIC", "REDUNDANT", "COMPRESSED"};
-    g_key_block_size = {0, 0, 1, 2, 4};
-  } else if (row_format.compare("none") == 0) {
-    g_key_block_size.clear();
-  } else {
-    g_row_format.push_back(row_format);
-  }
-
-  if (g_innodb_page_size > INNODB_16K_PAGE_SIZE) {
-    g_row_format.clear();
-    g_key_block_size.clear();
-  }
-
-  int undo_tbs_count = opt_int(NUMBER_OF_UNDO_TABLESPACE);
-  if (undo_tbs_count > 0) {
-    for (int i = 1; i <= undo_tbs_count; i++) {
-      g_undo_tablespace.push_back("undo_00" + std::to_string(i));
-    }
-  }
 }
 
 /*load objects from a file */
@@ -4362,7 +3483,8 @@ static std::string load_metadata_from_file() {
           type.compare("BOOLEAN") == 0 || type.compare("FLOAT") == 0 ||
           type.compare("REAL") == 0 || type.compare("DOUBLE") == 0 ||
           type.compare("DOUBLE PRECISION") == 0 ||
-          type.compare("INTEGER") == 0) {
+          type.compare("INTEGER") == 0 || type.compare("TIMESTAMP") == 0 ||
+          type.compare("JSON") == 0 || type.compare("JSONB") == 0) {
         a = new Column(col["name"].GetString(), type, table);
       } else if (type.compare("GENERATED") == 0) {
         auto name = col["name"].GetString();
@@ -4417,106 +3539,21 @@ void clean_up_at_end() {
 
 /* create new database and tablespace */
 void create_database_tablespace(Thd1 *thd) {
-  if (g_is_postgresql) {
-    execute_sql("DROP SCHEMA IF EXISTS pstress CASCADE", thd);
-    execute_sql("CREATE SCHEMA pstress", thd);
-    execute_sql("SET search_path TO pstress", thd);
-    return;
-  }
-
-  /* drop database test*/
-  execute_sql("DROP DATABASE IF EXISTS test", thd);
-  execute_sql("CREATE DATABASE test", thd); // todo encrypt database/schema
-
-  for (auto &tab : g_tablespace) {
-    if (tab.compare("innodb_system") == 0)
-      continue;
-
-    std::string sql =
-        "CREATE TABLESPACE " + tab + " ADD DATAFILE '" + tab + ".ibd' ";
-
-    if (g_innodb_page_size <= INNODB_16K_PAGE_SIZE) {
-      sql += " FILE_BLOCK_SIZE " + tab.substr(3, 3);
-    }
-
-    /* encrypt tablespace */
-    if (!options->at(Option::NO_ENCRYPTION)->getBool()) {
-      if (tab.substr(tab.size() - 2, 2).compare("_e") == 0)
-        sql += " ENCRYPTION='Y'";
-      else if (server_version() >= 80000)
-        sql += " ENCRYPTION='N'";
-    }
-
-    /* first try to rename tablespace back */
-    if (server_version() >= 80000)
-      execute_sql("ALTER TABLESPACE " + tab + "_rename rename to " + tab, thd);
-
-    execute_sql("DROP TABLESPACE " + tab, thd);
-
-    if (!execute_sql(sql, thd))
-      throw std::runtime_error("error in " + sql);
-  }
-
-  if (server_version() >= 80000) {
-    for (auto &name : g_undo_tablespace) {
-      std::string sql =
-          "CREATE UNDO TABLESPACE " + name + " ADD DATAFILE '" + name + ".ibu'";
-      execute_sql(sql, thd);
-    }
-  }
+  execute_sql("DROP SCHEMA IF EXISTS pstress CASCADE", thd);
+  execute_sql("CREATE SCHEMA pstress", thd);
+  execute_sql("SET search_path TO pstress", thd);
 }
 
 /* check all tables and partition in the starting and if any check table false
  * return false */
 static bool check_tables_partitions_preload(Table *table, Thd1 *thd) {
   size_t failures = 0;
-  if (g_is_postgresql) {
-    get_check_result("SELECT current_database(), '" +
-                         (table->type == Table::PARTITION ? pg_partition_target(table)
-                                                          : table->name_) +
-                         "', 'check', 'OK'",
-                     thd) ||
-        failures++;
-    if (failures != 0) {
-      check_failures++;
-    }
-    return failures == 0 ? true : false;
-  }
-  if (table->type == Table::PARTITION) {
-    int partition_count;
-    switch (static_cast<Partition *>(table)->part_type) {
-    case Partition::LIST:
-      partition_count = static_cast<Partition *>(table)->lists.size();
-      for (int i = 0; i < partition_count; i++) {
-        get_check_result("ALTER TABLE " + table->name_ + " CHECK PARTITION " +
-                             static_cast<Partition *>(table)->lists[i].name,
-                         thd) ||
-            failures++;
-      }
-      break;
-    case Partition::RANGE:
-      partition_count = static_cast<Partition *>(table)->positions.size();
-      for (int i = 0; i < partition_count; i++) {
-        get_check_result("ALTER TABLE " + table->name_ + " CHECK PARTITION " +
-                             static_cast<Partition *>(table)->positions[i].name,
-                         thd) ||
-            failures++;
-      }
-      break;
-    case Partition::HASH:
-    case Partition::KEY:
-      partition_count = static_cast<Partition *>(table)->number_of_part;
-      for (int i = 0; i < partition_count; i++) {
-        get_check_result("ALTER TABLE " + table->name_ + " CHECK PARTITION p" +
-                             std::to_string(i),
-                         thd) ||
-            failures++;
-      }
-      break;
-    }
-  } else {
-    get_check_result("CHECK TABLE " + table->name_, thd) || failures++;
-  }
+  get_check_result("SELECT current_database(), '" +
+                       (table->type == Table::PARTITION ? pg_partition_target(table)
+                                                        : table->name_) +
+                       "', 'check', 'OK'",
+                   thd) ||
+      failures++;
   if (failures != 0) {
     check_failures++;
   }
@@ -4559,10 +3596,7 @@ bool Thd1::load_metadata() {
 bool Thd1::run_some_query() {
   std::vector<Table::TABLE_TYPES> tableTypes = {Table::NORMAL, Table::FK,
                                                 Table::PARTITION};
-  if (g_is_postgresql)
-    execute_sql("SET search_path TO pstress", this);
-  else
-    execute_sql("USE " + options->at(Option::DATABASE)->getString(), this);
+  execute_sql("SET search_path TO pstress", this);
 
   /* first create temporary tables metadata if requried */
   int temp_tables;
@@ -4718,6 +3752,14 @@ bool Thd1::run_some_query() {
         all_session_tables->at(rand_int(all_session_tables->size() - 1));
     auto option = pick_some_option();
     ddl_query = options->at(option)->ddl == true ? true : false;
+
+    // PostgreSQL DDL is transactional. Keep schema changes outside random
+    // transactions so the in-memory schema model cannot outlive a rollback.
+    if (ddl_query && trx_left > 0) {
+      execute_sql("COMMIT", this);
+      trx_left = 0;
+      current_save_point = 0;
+    }
 
     switch (option) {
     case Option::DROP_INDEX:
