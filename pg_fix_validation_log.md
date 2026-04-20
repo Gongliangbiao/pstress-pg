@@ -143,3 +143,28 @@
 - Summary: `7/473350` queries failed, `100.00%` successful
 - Remaining failures: partition constraint misses from random partition-targeted
   inserts only (`23514`)
+
+## 2026-04-20 - Iteration 4: remove MySQL-only option entries
+
+### Scope
+
+- Removed MySQL-only command-line option definitions from `help.cpp` instead of
+  keeping hidden/inert options.
+- Removed legacy MySQL option aliases from argument normalization, keeping only
+  `--no-virtual` as a PostgreSQL-compatible alias for generated columns.
+- Removed server-option parsing state and declarations that were only used by
+  MySQL-style server variable mutation.
+- Removed generated-column column-compression access after deleting the
+  corresponding MySQL/Percona-only option.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Help check: `./build/src/pstress-pg --help` no longer exposes the deleted
+  MySQL-only option names or legacy aliases.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180`
+- Result: completed with exit code `0`
+- Summary: `346/1045435` queries failed, `99.97%` successful
+- Remaining failures: duplicate primary keys (`23505`), FK conflicts (`23503`),
+  transaction-abort follow-up errors (`25P02`), and deadlocks (`40P01`).

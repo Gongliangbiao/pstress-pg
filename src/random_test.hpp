@@ -413,7 +413,6 @@ struct Temporary_table : Table {
 
 int set_seed(Thd1 *thd);
 int sum_of_all_options(Thd1 *thd);
-int sum_of_all_server_options();
 Option::Opt pick_some_option();
 std::vector<std::string> *random_strs_generator(unsigned long int seed);
 bool load_metadata(Thd1 *thd);
@@ -426,7 +425,6 @@ bool execute_sql(const std::string &sql, Thd1 *thd);
 
 void save_metadata_to_file();
 void clean_up_at_end();
-void add_server_options(std::string str);
 void generate_metadata_for_tables();
 void create_database_tablespace(Thd1 *thd);
 #endif

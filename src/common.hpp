@@ -204,23 +204,12 @@ struct Option {
   std::atomic<unsigned long int> success_queries; // successful count
 };
 
-struct Server_Option { // Server_options
-  Server_Option(std::string n) : name(n){};
-  int prob;
-  std::string name;
-  std::vector<std::string> values;
-};
-
-/* delete options and server_options*/
+/* delete options */
 void delete_options();
 typedef std::vector<Option *> Opx;
-typedef std::vector<Server_Option *> Ser_Opx;
 extern Opx *options;
-extern Ser_Opx *server_options;
 extern const char *binary_fullpath;
 void add_options();
-void add_server_options(std::string str);
-void add_server_options_file(std::string file_name);
 Option *newOption(Option::Type t, Option::Opt o, std::string s);
 
 #endif

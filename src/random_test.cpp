@@ -456,14 +456,6 @@ Option::Opt pick_some_option() {
   return Option::MAX;
 }
 
-int sum_of_all_server_options() {
-  int total = 0;
-  for (auto &opt : *server_options) {
-    total += opt->prob;
-  }
-  return total;
-}
-
 /* pick some algorithm. and if caller pass value of algo & lock set it */
 inline static std::string
 pick_algorithm_lock(std::string *const algo = nullptr,
@@ -895,10 +887,6 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       g_type = BLOB;
     }
   }
-
-  if (options->at(Option::NO_COLUMN_COMPRESSION)->getBool() == false &&
-      rand_int(1) == 1 && g_type == BLOB)
-    compressed = true;
 
   /*number of columns in generated columns */
   size_t columns = rand_int(.6 * table->columns_->size()) + 1;

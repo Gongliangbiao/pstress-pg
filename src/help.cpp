@@ -4,56 +4,12 @@
 #include <libpq-fe.h>
 
 Opx *options = new Opx;
-Ser_Opx *server_options = new Ser_Opx;
 
 static std::string pq_client_version_string() {
   const int version = PQlibVersion();
   return std::to_string(version / 10000) + "." +
          std::to_string((version / 100) % 100) + "." +
          std::to_string(version % 100);
-}
-
-/* Process --mso=abc=30=40 to abc,{30,40}*/
-void add_server_options(std::string str) {
-  auto found = str.find_first_of(":", 0);
-  int probability = 100;
-  if (found != std::string::npos) {
-    probability = std::stoi(str.substr(0, found));
-    str = str.substr(found + 1, str.size());
-  }
-
-  /* extract probability */
-  found = str.find_first_of("=", 0);
-  if (found == std::string::npos)
-    throw std::runtime_error("Invalid string, " + str);
-
-  std::string name = str.substr(0, found);
-  Server_Option *so = new Server_Option(name);
-  so->prob = probability;
-  server_options->push_back(so);
-  str = str.substr(found + 1, str.size());
-
-  found = str.find_first_of("=");
-  while (found != std::string::npos) {
-    auto val = str.substr(0, found);
-    so->values.push_back(val);
-    str = str.substr(found + 1, str.size());
-    found = str.find_first_of("=");
-  }
-  /* push the last one */
-  so->values.push_back(str);
-}
-
-/* process file. and push to server options */
-void add_server_options_file(std::string file_name) {
-  std::ifstream f1;
-  f1.open(file_name);
-  if (!f1)
-    throw std::runtime_error("unable to open " + file_name);
-  std::string option;
-  while (f1 >> option)
-    add_server_options(option);
-  f1.close();
 }
 
 /* add new options */
@@ -81,23 +37,6 @@ void add_options() {
   opt->help = "Initial seed used for the test";
   opt->setInt(1);
 
-  /* Number of General tablespaces */
-  opt =
-      newOption(Option::INT, Option::NUMBER_OF_GENERAL_TABLESPACE, "general-tablespace-count");
-  opt->setInt("1");
-  opt->help = "maximum number of general tablespaces to model; ignored on PostgreSQL";
-
-  /* Number of Undo tablespaces */
-  opt =
-      newOption(Option::INT, Option::NUMBER_OF_UNDO_TABLESPACE, "undo-tablespace-count");
-  opt->setInt("3");
-  opt->help = "number of undo tablespaces to model; MySQL-only";
-
-  /* Engine */
-  opt = newOption(Option::STRING, Option::ENGINE, "engine");
-  opt->help = "storage engine to use when supported; ignored on PostgreSQL";
-  opt->setString("INNODB");
-
   /* Just Load DDL*/
   opt = newOption(Option::BOOL, Option::JUST_LOAD_DDL, "jlddl");
   opt->help = "load DDL and exit";
@@ -122,38 +61,6 @@ void add_options() {
   opt->setBool(false);
   opt->setArgs(no_argument);
 
-  /* disable table compression */
-  opt = newOption(Option::BOOL, Option::NO_TABLE_COMPRESSION,
-                  "no-table-compression");
-  opt->help = "disable table-level compression features";
-  opt->setBool(false);
-  opt->setArgs(no_argument);
-
-  /* disable column compression */
-  opt = newOption(Option::BOOL, Option::NO_COLUMN_COMPRESSION,
-                  "no-column-compression");
-  opt->help = "disable column-level compression features; MySQL/Percona-only";
-  opt->setBool(false);
-  opt->setArgs(no_argument);
-
-  /* disable all type of encrytion */
-  opt = newOption(Option::BOOL, Option::NO_ENCRYPTION, "no-encryption");
-  opt->help = "disable storage encryption features";
-  opt->setBool(false);
-  opt->setArgs(no_argument);
-
-  /* todo set default to all */
-  opt = newOption(Option::STRING, Option::ENCRYPTION_TYPE, "encryption-type");
-  opt->help =
-      "storage encryption mode selection. MySQL builds accept values such as "
-      "all, oracle, Y, N, KEYRING; PostgreSQL currently ignores this setting";
-  opt->setString("oracle");
-
-  /* create,alter,drop undo tablespace */
-  opt = newOption(Option::INT, Option::UNDO_SQL, "undo-tablespace-sql");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
   /* disable virtual columns*/
   opt = newOption(Option::BOOL, Option::NO_VIRTUAL_COLUMNS, "no-generated-columns");
   opt->help = "disable generated columns";
@@ -163,12 +70,6 @@ void add_options() {
   /* disable blob,text columns*/
   opt = newOption(Option::BOOL, Option::NO_BLOB, "no-blob");
   opt->help = "Disable blob columns";
-  opt->setBool(false);
-  opt->setArgs(no_argument);
-
-  /* disable all type of encrytion */
-  opt = newOption(Option::BOOL, Option::NO_TABLESPACE, "no-tablespace");
-  opt->help = "disable tablespace-specific features";
   opt->setBool(false);
   opt->setArgs(no_argument);
 
@@ -295,108 +196,12 @@ void add_options() {
   opt->help = "Probability of adding primary key in a table";
   opt->setInt(50);
 
-  /*Encrypt table */
-  opt = newOption(Option::INT, Option::ALTER_TABLE_ENCRYPTION,
-                  "alter-table-encryption");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
   /* modify column */
   opt = newOption(Option::INT, Option::ALTER_COLUMN_MODIFY, "modify-column");
   opt->help = "Alter table column modify";
   opt->setInt(10);
   opt->setSQL();
   opt->setDDL();
-
-  /*compress table */
-  opt = newOption(Option::INT, Option::ALTER_TABLE_COMPRESSION,
-                  "alter-table-compression");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* Row Format */
-  opt = newOption(Option::STRING, Option::ROW_FORMAT, "row-format");
-  opt->help =
-      "table storage layout policy. MySQL builds accept compressed, dynamic, "
-      "redundant and related combinations.\n"
-      "valid values are:\n all: use all supported MySQL row formats.\n"
-      "uncompressed: do not use compressed row format.\n"
-      "none: disable explicit row-format selection.\n"
-      "PostgreSQL ignores this setting.";
-  opt->setString("all");
-
-
-  /* Server option */
-  opt = newOption(Option::STRING, Option::MYSQLD_SERVER_OPTION, "server-option");
-  opt->help =
-      "server variable variations used during workload execution; see "
-      "--set-server-variable. Format: n:option=v1=v2 where n is probability. "
-      "This is currently implemented only for MySQL-style variables.";
-
-  opt = newOption(Option::STRING, Option::SERVER_OPTION_FILE, "server-option-file");
-  opt->help =
-      "server option file used with --set-server-variable.\n"
-      "File lines use the form n:option=v1=v2.\n"
-      "This is currently implemented only for MySQL-style variables.";
-
-  /* Set Global */
-  opt = newOption(Option::INT, Option::SET_GLOBAL_VARIABLE, "set-server-variable");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* alter instance disable/enable redo logging */
-  opt = newOption(Option::INT, Option::ALTER_REDO_LOGGING, "alter-redo-log");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* alter instance rotate innodb master key */
-  opt = newOption(Option::INT, Option::ALTER_MASTER_KEY, "rotate-master-key");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* alter instance rotate innodb system key */
-  opt = newOption(Option::INT, Option::ALTER_ENCRYPTION_KEY, "rotate-encryption-key");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* alter instance rotate gcache master key */
-  opt = newOption(Option::INT, Option::ALTER_GCACHE_MASTER_KEY, "rotate-gcache-key");
-  opt->help = "removed MySQL/PXC-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* Reload keyring component configuration */
-  opt = newOption(Option::INT, Option::ALTER_INSTANCE_RELOAD_KEYRING, "reload-keyring");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* rotate redo log key */
-  opt = newOption(Option::INT, Option::ROTATE_REDO_LOG_KEY,
-                  "rotate-redo-log-key");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /*Tablespace Encrytion */
-  opt = newOption(Option::INT, Option::ALTER_TABLESPACE_ENCRYPTION,
-                  "alter-tablespace-encryption");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /*Discard tablespace */
-  opt = newOption(Option::INT, Option::ALTER_DISCARD_TABLESPACE,
-		  "alter-discard-tablespace");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /*Database Encryption */
-  opt = newOption(Option::INT, Option::ALTER_DATABASE_ENCRYPTION, "alter-database-encryption");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
-
-  /* Tablespace Rename */
-  opt =
-      newOption(Option::INT, Option::ALTER_TABLESPACE_RENAME, "alter-tablespace-rename");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
 
   /* SELECT */
   opt = newOption(Option::BOOL, Option::NO_SELECT, "no-select");
@@ -473,11 +278,6 @@ void add_options() {
   opt->setInt(1);
   opt->setSQL();
   opt->setDDL();
-
-  /* Alter table Storage Engine to Innodb with different Algorithms */
-  opt = newOption(Option::INT, Option::ALTER_ENGINE, "alter-table-engine");
-  opt->help = "removed MySQL-only option; ignored by PostgreSQL";
-  opt->setInt(0);
 
   /* Add column */
   opt = newOption(Option::INT, Option::ADD_COLUMN, "add-column");
@@ -765,15 +565,11 @@ void Option::print_pretty() {
   std::cout << std::endl;
 }
 
-/* delete options and server options */
+/* delete options */
 void delete_options() {
   for (auto &i : *options)
     delete i;
   delete options;
-  /* delete server options */
-  for (auto &i : *server_options)
-    delete i;
-  delete server_options;
 }
 
 void show_help(Option::Opt option) {
@@ -881,10 +677,6 @@ void show_help(std::string help) {
         << "---------------------------------------------------------------"
            "--------------------------"
         << std::endl;
-    std::cout << " - Legacy aliases kept for compatibility: --tbs-count, "
-                 "--no-tbs, --mso, --sof, --set-variable, --no-virtual and "
-                 "the old alt-* tablespace flags"
-              << std::endl;
   }
 
   void show_config_help(void) {

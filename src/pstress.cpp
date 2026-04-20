@@ -25,20 +25,7 @@
 static std::vector<std::string> normalize_legacy_option_aliases(int argc,
                                                                 char *argv[]) {
   static const std::vector<std::pair<std::string, std::string>> aliases = {
-      {"--tbs-count", "--general-tablespace-count"},
-      {"--no-tbs", "--no-tablespace"},
-      {"--mso", "--server-option"},
-      {"--sof", "--server-option-file"},
-      {"--set-variable", "--set-server-variable"},
-      {"--undo-tbs-count", "--undo-tablespace-count"},
-      {"--undo-tbs-sql", "--undo-tablespace-sql"},
       {"--no-virtual", "--no-generated-columns"},
-      {"--alter-table-encrypt", "--alter-table-encryption"},
-      {"--alter-table-compress", "--alter-table-compression"},
-      {"--alt-tbs-enc", "--alter-tablespace-encryption"},
-      {"--alt-discard-tbs", "--alter-discard-tablespace"},
-      {"--alt-db-enc", "--alter-database-encryption"},
-      {"--alt-tbs-rename", "--alter-tablespace-rename"},
   };
 
   std::vector<std::string> rewritten(argc);
@@ -126,13 +113,6 @@ int main(int argc, char *argv[]) {
     case 'C':
       show_cli_help();
       exit(EXIT_FAILURE);
-      break;
-    case Option::MYSQLD_SERVER_OPTION:
-      std::cout << optarg << std::endl;
-      add_server_options(optarg);
-      break;
-    case Option::SERVER_OPTION_FILE:
-      add_server_options_file(optarg);
       break;
     case Option::INVALID_OPTION:
       std::cout << "Invalid option , exiting" << std::endl;
