@@ -242,3 +242,132 @@
 - Remaining failures: FK conflicts (`23503`), duplicate unique/primary values
   (`23505`), deadlocks (`40P01`), transaction-abort follow-up errors (`25P02`),
   and one random check/partition constraint miss (`23514`).
+
+## 2026-04-23 - Iteration 7: add P1 PostgreSQL network, bit, money, XML, and text-search types
+
+### Scope
+
+- Added PostgreSQL P1 type coverage to random metadata generation:
+  `BIT`, `BIT VARYING`, `INET`, `CIDR`, `MACADDR`, `MACADDR8`, `MONEY`,
+  `XML`, `TSVECTOR`, and `TSQUERY`.
+- Added PostgreSQL-safe random value generators, deterministic unique values,
+  DML value formatting, metadata reload handling, and type-name round-tripping
+  for the new P1 family.
+- Enabled comparable P1 types such as `BIT`, `INET`, `CIDR`, `MACADDR`,
+  `MACADDR8`, and `MONEY` for random `WHERE` predicate selection, while keeping
+  `XML`, `TSVECTOR`, and `TSQUERY` out of unsupported equality paths.
+- Kept generated columns PostgreSQL-valid by filtering out non-immutable source
+  types such as `TIMETZ`, `TIMESTAMPTZ`, `XML`, `TSVECTOR`, `TSQUERY`, and
+  `MONEY`.
+- Wrapped generated integer arithmetic through bounded `NUMERIC` expressions to
+  avoid `SMALLINT`/`INT`/`BIGINT` overflow during random generated-column DDL.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted smoke: `--tables=4 --threads=1 --seconds=30 --columns=16
+  --indexes=4`
+- Smoke findings during fix loop:
+  invalid `CIDR` literals (`22P02`), duplicate unique values on `CIDR`
+  referenceable columns (`23505`), non-immutable generated expressions
+  (`42P17`), and generated integer overflow (`22003`).
+- Smoke result after fixes: completed with exit code `0`; no `syntax error`,
+  `FATAL`, `42P17`, `42883`, `22P*`, or `22003` structural failures remained.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180 --columns=16
+  --indexes=4`
+- Result: completed with exit code `0`
+- Summary: `1369/600163` queries failed, `99.77%` successful
+- Confirmed DDL/value coverage in this random sample: `BIT`, `BIT VARYING`,
+  `INET`, `CIDR`, `MACADDR`, `MACADDR8`, `MONEY`, `XML`, `TSVECTOR`, and
+  `TSQUERY`.
+- Remaining failures: duplicate unique/primary values (`23505`), FK conflicts
+  (`23503`), transaction-abort follow-up errors (`25P02`), and deadlocks
+  (`40P01`).
+
+## 2026-04-23 - Iteration 8: add P2 PostgreSQL geometric types
+
+### Scope
+
+- Added PostgreSQL geometric type coverage to random metadata generation:
+  `POINT`, `LINE`, `LSEG`, `BOX`, `PATH`, `POLYGON`, and `CIRCLE`.
+- Added PostgreSQL-valid geometric literal/value generators for insert, update,
+  and metadata reload paths.
+- Integrated the new P2 family into add/modify-column flows, type-name parsing,
+  type-name serialization, and random schema generation.
+- Kept the first P2 integration conservative by excluding geometric types from
+  FK parent selection, generated-column source selection, default B-tree index
+  selection, and random equality/range predicate selection.
+- Fixed a pre-existing PostgreSQL partition-table issue where random inserts
+  used `ON CONFLICT` against partitioned tables without a guaranteed matching
+  unique target; partition-table inserts now skip `ON CONFLICT`.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted smoke: `--tables=4 --threads=1 --seconds=30 --columns=16
+  --indexes=4`
+- Smoke findings during fix loop:
+  geometric columns were initially selected for default B-tree indexes
+  (`42704`), and partition-table inserts surfaced invalid `ON CONFLICT`
+  targets (`42P10`).
+- Smoke result after fixes: completed with exit code `0`; no `syntax error`,
+  `FATAL`, `42704`, `42883`, `42P10`, `22P*`, `22003`, or `42P17` structural
+  failures remained.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180 --columns=16
+  --indexes=4`
+- Result: completed with exit code `0`
+- Summary: `395/830482` queries failed, `99.95%` successful
+- Confirmed DDL/value coverage in this random sample: `POINT`, `LINE`, `LSEG`,
+  `BOX`, `PATH`, `POLYGON`, and `CIRCLE`.
+- Remaining failures: duplicate unique/primary values (`23505`), FK conflicts
+  (`23503`), deadlocks (`40P01`), and random check/partition constraint misses
+  (`23514`).
+
+## 2026-04-23 - Iteration 9: add PostgreSQL array and range types
+
+### Scope
+
+- Added PostgreSQL array coverage to random metadata generation:
+  `INT[]`, `BIGINT[]`, `NUMERIC[]`, `TEXT[]`, `BOOLEAN[]`, and
+  `TIMESTAMP[]`.
+- Added PostgreSQL built-in range coverage to random metadata generation:
+  `INT4RANGE`, `INT8RANGE`, `NUMRANGE`, `TSRANGE`, `TSTZRANGE`, and
+  `DATERANGE`.
+- Added PostgreSQL-safe random value generators for arrays and ranges, using
+  typed `ARRAY[...]` expressions plus constructor-style range expressions.
+- Integrated the new P3 family into add/modify-column flows, type parsing,
+  type serialization, metadata reload, and random schema generation.
+- Kept the first P3 integration conservative by excluding arrays and ranges
+  from FK parent selection, generated-column source selection, default B-tree
+  index selection, and random comparison-predicate selection.
+- Fixed range generation so date/time range constructors always emit
+  non-decreasing bounds; this removed `22000` failures from invalid range
+  endpoints.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted smoke: `--tables=4 --threads=1 --seconds=30 --columns=16
+  --indexes=4`
+- Smoke findings during fix loop:
+  date/time range constructors initially emitted reversed bounds and triggered
+  `22000`.
+- Smoke result after fixes: completed with exit code `0`; no `syntax error`,
+  `FATAL`, `42704`, `42883`, `42P10`, `22000`, `22003`, or `42P17`
+  structural failures remained.
+- Smoke confirmed DDL/value coverage for the new family, including `INT[]`,
+  `NUMERIC[]`, `TEXT[]`, `BOOLEAN[]`, `TIMESTAMP[]`, `INT4RANGE`,
+  `INT8RANGE`, `NUMRANGE`, `TSTZRANGE`, and `DATERANGE`.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180 --columns=16
+  --indexes=4`
+- Result: completed with exit code `0`
+- Summary: `814/258087` queries failed, `99.68%` successful
+- Confirmed DDL/value coverage in this random sample: `BIGINT[]`, `NUMERIC[]`,
+  `TEXT[]`, `BOOLEAN[]`, `TIMESTAMP[]`, `INT8RANGE`, `NUMRANGE`, `TSRANGE`,
+  `TSTZRANGE`, and `DATERANGE`.
+- Remaining failures: duplicate unique/primary values (`23505`), FK conflicts
+  (`23503`), transaction-abort follow-up errors (`25P02`), and deadlocks
+  (`40P01`).

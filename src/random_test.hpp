@@ -60,6 +60,35 @@ public:
     TIMESTAMPTZ,
     INTERVAL,
     BOOL,
+    BIT,
+    VARBIT,
+    INET,
+    CIDR,
+    MACADDR,
+    MACADDR8,
+    MONEY,
+    XML,
+    TSVECTOR,
+    TSQUERY,
+    POINT,
+    LINE,
+    LSEG,
+    BOX,
+    PATH,
+    POLYGON,
+    CIRCLE,
+    INTARRAY,
+    BIGINTARRAY,
+    NUMERICARRAY,
+    TEXTARRAY,
+    BOOLARRAY,
+    TIMESTAMPARRAY,
+    INT4RANGE,
+    INT8RANGE,
+    NUMRANGE,
+    TSRANGE,
+    TSTZRANGE,
+    DATERANGE,
     BYTEA,
     BLOB,
     JSON,
@@ -90,7 +119,8 @@ public:
 private:
   virtual std::string clause() {
     std::string str = col_type_to_string(type_);
-    if (length > 0 && (type_ == CHAR || type_ == VARCHAR))
+    if (length > 0 &&
+        (type_ == CHAR || type_ == VARCHAR || type_ == BIT || type_ == VARBIT))
       str += "(" + std::to_string(length) + ")";
     return str;
   };

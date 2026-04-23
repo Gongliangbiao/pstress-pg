@@ -101,9 +101,38 @@ static bool supports_like_predicate(const Column *column) {
 	  case Column::TIME:
 	  case Column::TIMETZ:
 	  case Column::TIMESTAMP:
-	  case Column::TIMESTAMPTZ:
-	  case Column::INTERVAL:
-	  case Column::BOOL:
+    case Column::TIMESTAMPTZ:
+    case Column::INTERVAL:
+    case Column::BIT:
+    case Column::VARBIT:
+    case Column::INET:
+    case Column::CIDR:
+    case Column::MACADDR:
+    case Column::MACADDR8:
+    case Column::MONEY:
+    case Column::XML:
+    case Column::TSVECTOR:
+    case Column::TSQUERY:
+    case Column::POINT:
+    case Column::LINE:
+    case Column::LSEG:
+    case Column::BOX:
+    case Column::PATH:
+    case Column::POLYGON:
+    case Column::CIRCLE:
+    case Column::INTARRAY:
+    case Column::BIGINTARRAY:
+    case Column::NUMERICARRAY:
+    case Column::TEXTARRAY:
+    case Column::BOOLARRAY:
+    case Column::TIMESTAMPARRAY:
+    case Column::INT4RANGE:
+    case Column::INT8RANGE:
+    case Column::NUMRANGE:
+    case Column::TSRANGE:
+    case Column::TSTZRANGE:
+    case Column::DATERANGE:
+    case Column::BOOL:
 	  case Column::BYTEA:
 	  case Column::JSON:
 	  case Column::JSONB:
@@ -152,7 +181,35 @@ static int pg_index_width_estimate(const Column *column) {
   case Column::INTERVAL:
   case Column::NUMERIC:
   case Column::UUID:
+  case Column::INET:
+  case Column::CIDR:
+  case Column::MACADDR:
+  case Column::MACADDR8:
+  case Column::MONEY:
     return 8;
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
+    return 128;
+  case Column::BIT:
+  case Column::VARBIT:
+    return std::max(1, std::min(column->length, 64));
   case Column::CHAR:
   case Column::VARCHAR:
     return std::max(1, std::min(column->length, 64));
@@ -161,6 +218,9 @@ static int pg_index_width_estimate(const Column *column) {
     return 128;
   case Column::JSON:
   case Column::JSONB:
+  case Column::XML:
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
     return 128;
   case Column::GENERATED: {
     auto generated =
@@ -183,7 +243,35 @@ static int pg_index_width_estimate(const Column *column) {
     case Column::INTERVAL:
     case Column::NUMERIC:
     case Column::UUID:
+    case Column::INET:
+    case Column::CIDR:
+    case Column::MACADDR:
+    case Column::MACADDR8:
+    case Column::MONEY:
       return 8;
+    case Column::POINT:
+    case Column::LINE:
+    case Column::LSEG:
+    case Column::BOX:
+    case Column::PATH:
+    case Column::POLYGON:
+    case Column::CIRCLE:
+    case Column::INTARRAY:
+    case Column::BIGINTARRAY:
+    case Column::NUMERICARRAY:
+    case Column::TEXTARRAY:
+    case Column::BOOLARRAY:
+    case Column::TIMESTAMPARRAY:
+    case Column::INT4RANGE:
+    case Column::INT8RANGE:
+    case Column::NUMRANGE:
+    case Column::TSRANGE:
+    case Column::TSTZRANGE:
+    case Column::DATERANGE:
+      return 128;
+    case Column::BIT:
+    case Column::VARBIT:
+      return std::max(1, std::min(column->length, 64));
     case Column::CHAR:
     case Column::VARCHAR:
       return std::max(1, std::min(column->length, 64));
@@ -191,6 +279,9 @@ static int pg_index_width_estimate(const Column *column) {
     case Column::BYTEA:
     case Column::JSON:
     case Column::JSONB:
+    case Column::XML:
+    case Column::TSVECTOR:
+    case Column::TSQUERY:
     case Column::GENERATED:
     case Column::COLUMN_MAX:
       return 128;
@@ -215,6 +306,25 @@ static bool pg_fk_referenceable_column(const Column *column) {
   if (column == nullptr || column->type_ == Column::GENERATED ||
       column->type_ == Column::BLOB || column->type_ == Column::BYTEA ||
       column->type_ == Column::JSON || column->type_ == Column::JSONB ||
+      column->type_ == Column::XML || column->type_ == Column::TSVECTOR ||
+      column->type_ == Column::TSQUERY ||
+      column->type_ == Column::POINT || column->type_ == Column::LINE ||
+      column->type_ == Column::LSEG || column->type_ == Column::BOX ||
+      column->type_ == Column::PATH || column->type_ == Column::POLYGON ||
+      column->type_ == Column::CIRCLE ||
+      column->type_ == Column::INTARRAY ||
+      column->type_ == Column::BIGINTARRAY ||
+      column->type_ == Column::NUMERICARRAY ||
+      column->type_ == Column::TEXTARRAY ||
+      column->type_ == Column::BOOLARRAY ||
+      column->type_ == Column::TIMESTAMPARRAY ||
+      column->type_ == Column::INT4RANGE ||
+      column->type_ == Column::INT8RANGE ||
+      column->type_ == Column::NUMRANGE ||
+      column->type_ == Column::TSRANGE ||
+      column->type_ == Column::TSTZRANGE ||
+      column->type_ == Column::DATERANGE ||
+      column->type_ == Column::BIT || column->type_ == Column::VARBIT ||
       column->type_ == Column::INTERVAL ||
       column->type_ == Column::BOOL) {
     return false;
@@ -232,6 +342,42 @@ static int pg_index_total_width(const Index *index) {
     width += pg_index_width_estimate(ind_col->column);
   }
   return width;
+}
+
+static bool pg_generated_source_column(const Column *column) {
+  switch (column->type_) {
+  case Column::GENERATED:
+  case Column::TIMETZ:
+  case Column::TIMESTAMPTZ:
+  case Column::MONEY:
+  case Column::XML:
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
+    return false;
+  case Column::COLUMN_MAX:
+    return false;
+  default:
+    return !column->auto_increment;
+  }
 }
 
 /* return table pointer of matching table. This is only done during the
@@ -693,6 +839,201 @@ static std::string rand_uuid_value() {
          hex(12) + "'::uuid";
 }
 
+static std::string rand_bit_value(int length, bool varying) {
+  int bit_length = std::max(1, length);
+  if (varying)
+    bit_length = rand_int(bit_length, 1);
+  std::string bits;
+  for (int i = 0; i < bit_length; ++i)
+    bits += rand_int(1) == 1 ? '1' : '0';
+  return "B'" + bits + "'";
+}
+
+static std::string rand_inet_value() {
+  return "'" + std::to_string(rand_int(223, 1)) + "." +
+         std::to_string(rand_int(255, 0)) + "." +
+         std::to_string(rand_int(255, 0)) + "." +
+         std::to_string(rand_int(254, 1)) + "'::inet";
+}
+
+static std::string rand_cidr_value() {
+  return "'" + std::to_string(rand_int(223, 1)) + "." +
+         std::to_string(rand_int(255, 0)) + "." +
+         std::to_string(rand_int(255, 0)) + ".0/24'::cidr";
+}
+
+static std::string rand_macaddr_value(bool macaddr8) {
+  static const char *digits = "0123456789abcdef";
+  int groups = macaddr8 ? 8 : 6;
+  std::string out = "'";
+  for (int i = 0; i < groups; ++i) {
+    if (i > 0)
+      out += ":";
+    out += digits[rand_int(15, 0)];
+    out += digits[rand_int(15, 0)];
+  }
+  out += macaddr8 ? "'::macaddr8" : "'::macaddr";
+  return out;
+}
+
+static std::string rand_money_value() {
+  return std::to_string(rand_int(100000, 1)) + "." +
+         std::to_string(rand_int(99, 0)) + "::money";
+}
+
+static std::string rand_xml_value() {
+  return "XMLPARSE(CONTENT '<r k=\"" + std::to_string(rand_int(100000)) +
+         "\">" + rand_string(12, 3) + "</r>')";
+}
+
+static std::string rand_tsvector_value() {
+  return "to_tsvector('simple', '" + rand_string(12, 3) + " " +
+         rand_string(12, 3) + "')";
+}
+
+static std::string rand_tsquery_value() {
+  return "to_tsquery('simple', '" + rand_string(12, 3) + "')";
+}
+
+static std::string rand_geom_coord() {
+  return std::to_string(rand_int(1000, -1000)) + "." +
+         std::to_string(rand_int(9999, 0));
+}
+
+static std::string rand_geom_point_literal() {
+  return "(" + rand_geom_coord() + "," + rand_geom_coord() + ")";
+}
+
+static std::string rand_point_value() {
+  return "'" + rand_geom_point_literal() + "'::point";
+}
+
+static std::string rand_line_value() {
+  return "'[" + rand_geom_point_literal() + "," + rand_geom_point_literal() +
+         "]'::line";
+}
+
+static std::string rand_lseg_value() {
+  return "'[" + rand_geom_point_literal() + "," + rand_geom_point_literal() +
+         "]'::lseg";
+}
+
+static std::string rand_box_value() {
+  return "'(" + rand_geom_point_literal() + "," + rand_geom_point_literal() +
+         ")'::box";
+}
+
+static std::string rand_path_value() {
+  std::string open = rand_int(1) == 1 ? "[" : "(";
+  std::string close = open == "[" ? "]" : ")";
+  return "'" + open + rand_geom_point_literal() + "," +
+         rand_geom_point_literal() + "," + rand_geom_point_literal() + close +
+         "'::path";
+}
+
+static std::string rand_polygon_value() {
+  return "'(" + rand_geom_point_literal() + "," + rand_geom_point_literal() +
+         "," + rand_geom_point_literal() + ")'::polygon";
+}
+
+static std::string rand_circle_value() {
+  return "'<" + rand_geom_point_literal() + "," +
+         std::to_string(rand_int(500, 1)) + "." +
+         std::to_string(rand_int(9999, 0)) + ">'::circle";
+}
+
+static std::string rand_int_array_value() {
+  return "ARRAY[" + std::to_string(rand_int(100000, 1)) + "," +
+         std::to_string(rand_int(100000, 1)) + "," +
+         std::to_string(rand_int(100000, 1)) + "]::int[]";
+}
+
+static std::string rand_bigint_array_value() {
+  return "ARRAY[" +
+         std::to_string(static_cast<long long>(rand_int(1000000000, 1)) *
+                        rand_int(1000, 1)) +
+         "," +
+         std::to_string(static_cast<long long>(rand_int(1000000000, 1)) *
+                        rand_int(1000, 1)) +
+         "]::bigint[]";
+}
+
+static std::string rand_numeric_array_value() {
+  return "ARRAY[" + std::to_string(rand_int(100000, 1)) + "." +
+         std::to_string(rand_int(9999, 0)) + "," +
+         std::to_string(rand_int(100000, 1)) + "." +
+         std::to_string(rand_int(9999, 0)) + "]::numeric[]";
+}
+
+static std::string rand_text_array_value() {
+  return "ARRAY['" + rand_string(12, 1) + "','" + rand_string(12, 1) +
+         "']::text[]";
+}
+
+static std::string rand_bool_array_value() {
+  return "ARRAY[" + std::string(rand_int(1) == 1 ? "true" : "false") + "," +
+         std::string(rand_int(1) == 1 ? "true" : "false") + "]::boolean[]";
+}
+
+static std::string rand_timestamp_array_value() {
+  return "ARRAY[" + rand_timestamp_value() + "," + rand_timestamp_value() +
+         "]::timestamp[]";
+}
+
+static std::string rand_int4range_value() {
+  int lower = rand_int(90000, 1);
+  int upper = lower + rand_int(1000, 1);
+  return "int4range(" + std::to_string(lower) + ", " + std::to_string(upper) +
+         ", '[)')";
+}
+
+static std::string rand_int8range_value() {
+  long long lower =
+      static_cast<long long>(rand_int(1000000000, 1)) * rand_int(1000, 1);
+  long long upper = lower + rand_int(100000, 1);
+  return "int8range(" + std::to_string(lower) + ", " + std::to_string(upper) +
+         ", '[)')";
+}
+
+static std::string rand_numrange_value() {
+  double lower = rand_int(100000, 1) + rand_int(9999, 0) / 10000.0;
+  double upper = lower + rand_int(1000, 1) / 10.0;
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(4);
+  out << "numrange(" << lower << ", " << upper << ", '[)')";
+  return out.str();
+}
+
+static std::string rand_tsrange_value() {
+  int start_days = rand_int(10000, 0);
+  int span_days = rand_int(365, 1);
+  return "tsrange(TIMESTAMP '2000-01-01 00:00:00' + INTERVAL '" +
+         std::to_string(start_days) + " days', TIMESTAMP '2000-01-01 00:00:00' + "
+         "INTERVAL '" + std::to_string(start_days + span_days) + " days', '[)')";
+}
+
+static std::string rand_tstzrange_value() {
+  int start_days = rand_int(10000, 0);
+  int span_days = rand_int(365, 1);
+  return "tstzrange(TIMESTAMPTZ '2000-01-01 00:00:00+00' + INTERVAL '" +
+         std::to_string(start_days) + " days', TIMESTAMPTZ '2000-01-01 00:00:00+00' + "
+         "INTERVAL '" + std::to_string(start_days + span_days) + " days', '[)')";
+}
+
+static std::string rand_daterange_value() {
+  int start_days = rand_int(10000, 0);
+  int span_days = rand_int(365, 1);
+  return "daterange(DATE '2000-01-01' + " + std::to_string(start_days) +
+         ", DATE '2000-01-01' + " + std::to_string(start_days + span_days) +
+         ", '[)')";
+}
+
+static std::string two_digit_hex(int value) {
+  std::ostringstream out;
+  out << std::hex << std::setw(2) << std::setfill('0') << (value & 0xff);
+  return out.str();
+}
+
 static std::string deterministic_unique_value(const Column *column, int offset) {
   int value = offset + 1;
   switch (column->type_) {
@@ -731,11 +1072,52 @@ static std::string deterministic_unique_value(const Column *column, int offset) 
   case Column::UUID:
     return "'00000000-0000-4000-a000-" + std::to_string(100000000000 + value) +
            "'::uuid";
+  case Column::INET:
+    return "'10." + std::to_string((value / 65536) % 256) + "." +
+           std::to_string((value / 256) % 256) + "." +
+           std::to_string(value % 256) + "'::inet";
+  case Column::CIDR:
+    return "'10." + std::to_string((value / 256) % 256) + "." +
+           std::to_string(value % 256) + ".0/24'::cidr";
+  case Column::MACADDR:
+    return "'02:00:00:" + two_digit_hex((value / 65536) % 256) + ":" +
+           two_digit_hex((value / 256) % 256) + ":" + two_digit_hex(value % 256) +
+           "'::macaddr";
+  case Column::MACADDR8:
+    return "'02:00:00:00:00:" + two_digit_hex((value / 65536) % 256) + ":" +
+           two_digit_hex((value / 256) % 256) + ":" + two_digit_hex(value % 256) +
+           "'::macaddr8";
+  case Column::MONEY:
+    return std::to_string(value) + ".01::money";
   case Column::BOOL:
+  case Column::BIT:
+  case Column::VARBIT:
   case Column::BYTEA:
   case Column::BLOB:
   case Column::JSON:
   case Column::JSONB:
+  case Column::XML:
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
   case Column::INTERVAL:
   case Column::GENERATED:
   case Column::COLUMN_MAX:
@@ -776,11 +1158,51 @@ static std::string random_unique_value_expr(const Column *column) {
     return "(random() * 1000000000)::double precision";
   case Column::UUID:
     return "md5(clock_timestamp()::text || random()::text)::uuid";
+  case Column::INET:
+    return "('10.' || floor(random() * 256)::int || '.' || "
+           "floor(random() * 256)::int || '.' || floor(random() * 256)::int)::inet";
+  case Column::CIDR:
+    return "('10.' || floor(random() * 256)::int || '.' || "
+           "floor(random() * 256)::int || '.0/24')::cidr";
+  case Column::MACADDR:
+    return "('02:00:00:' || lpad(to_hex(floor(random() * 256)::int), 2, '0') || ':' || "
+           "lpad(to_hex(floor(random() * 256)::int), 2, '0') || ':' || "
+           "lpad(to_hex(floor(random() * 256)::int), 2, '0'))::macaddr";
+  case Column::MACADDR8:
+    return "('02:00:00:00:00:' || lpad(to_hex(floor(random() * 256)::int), 2, '0') || ':' || "
+           "lpad(to_hex(floor(random() * 256)::int), 2, '0') || ':' || "
+           "lpad(to_hex(floor(random() * 256)::int), 2, '0'))::macaddr8";
+  case Column::MONEY:
+    return "(random() * 1000000000)::numeric::money";
   case Column::BOOL:
+  case Column::BIT:
+  case Column::VARBIT:
   case Column::BYTEA:
   case Column::BLOB:
   case Column::JSON:
   case Column::JSONB:
+  case Column::XML:
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
   case Column::INTERVAL:
   case Column::GENERATED:
   case Column::COLUMN_MAX:
@@ -841,6 +1263,64 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return TIMESTAMPTZ;
   else if (type.compare("INTERVAL") == 0)
     return INTERVAL;
+  else if (type.compare("BIT") == 0)
+    return BIT;
+  else if (type.compare("BIT VARYING") == 0 || type.compare("VARBIT") == 0)
+    return VARBIT;
+  else if (type.compare("INET") == 0)
+    return INET;
+  else if (type.compare("CIDR") == 0)
+    return CIDR;
+  else if (type.compare("MACADDR") == 0)
+    return MACADDR;
+  else if (type.compare("MACADDR8") == 0)
+    return MACADDR8;
+  else if (type.compare("MONEY") == 0)
+    return MONEY;
+  else if (type.compare("XML") == 0)
+    return XML;
+  else if (type.compare("TSVECTOR") == 0)
+    return TSVECTOR;
+  else if (type.compare("TSQUERY") == 0)
+    return TSQUERY;
+  else if (type.compare("POINT") == 0)
+    return POINT;
+  else if (type.compare("LINE") == 0)
+    return LINE;
+  else if (type.compare("LSEG") == 0)
+    return LSEG;
+  else if (type.compare("BOX") == 0)
+    return BOX;
+  else if (type.compare("PATH") == 0)
+    return PATH;
+  else if (type.compare("POLYGON") == 0)
+    return POLYGON;
+  else if (type.compare("CIRCLE") == 0)
+    return CIRCLE;
+  else if (type.compare("INT[]") == 0 || type.compare("INTEGER[]") == 0)
+    return INTARRAY;
+  else if (type.compare("BIGINT[]") == 0)
+    return BIGINTARRAY;
+  else if (type.compare("NUMERIC[]") == 0)
+    return NUMERICARRAY;
+  else if (type.compare("TEXT[]") == 0)
+    return TEXTARRAY;
+  else if (type.compare("BOOLEAN[]") == 0 || type.compare("BOOL[]") == 0)
+    return BOOLARRAY;
+  else if (type.compare("TIMESTAMP[]") == 0)
+    return TIMESTAMPARRAY;
+  else if (type.compare("INT4RANGE") == 0)
+    return INT4RANGE;
+  else if (type.compare("INT8RANGE") == 0)
+    return INT8RANGE;
+  else if (type.compare("NUMRANGE") == 0)
+    return NUMRANGE;
+  else if (type.compare("TSRANGE") == 0)
+    return TSRANGE;
+  else if (type.compare("TSTZRANGE") == 0)
+    return TSTZRANGE;
+  else if (type.compare("DATERANGE") == 0)
+    return DATERANGE;
   else if (type.compare("BYTEA") == 0)
     return BYTEA;
   else if (type.compare("UUID") == 0)
@@ -887,6 +1367,64 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "TIMESTAMP WITH TIME ZONE";
   case INTERVAL:
     return "INTERVAL";
+  case BIT:
+    return "BIT";
+  case VARBIT:
+    return "BIT VARYING";
+  case INET:
+    return "INET";
+  case CIDR:
+    return "CIDR";
+  case MACADDR:
+    return "MACADDR";
+  case MACADDR8:
+    return "MACADDR8";
+  case MONEY:
+    return "MONEY";
+  case XML:
+    return "XML";
+  case TSVECTOR:
+    return "TSVECTOR";
+  case TSQUERY:
+    return "TSQUERY";
+  case POINT:
+    return "POINT";
+  case LINE:
+    return "LINE";
+  case LSEG:
+    return "LSEG";
+  case BOX:
+    return "BOX";
+  case PATH:
+    return "PATH";
+  case POLYGON:
+    return "POLYGON";
+  case CIRCLE:
+    return "CIRCLE";
+  case INTARRAY:
+    return "INT[]";
+  case BIGINTARRAY:
+    return "BIGINT[]";
+  case NUMERICARRAY:
+    return "NUMERIC[]";
+  case TEXTARRAY:
+    return "TEXT[]";
+  case BOOLARRAY:
+    return "BOOLEAN[]";
+  case TIMESTAMPARRAY:
+    return "TIMESTAMP[]";
+  case INT4RANGE:
+    return "INT4RANGE";
+  case INT8RANGE:
+    return "INT8RANGE";
+  case NUMRANGE:
+    return "NUMRANGE";
+  case TSRANGE:
+    return "TSRANGE";
+  case TSTZRANGE:
+    return "TSTZRANGE";
+  case DATERANGE:
+    return "DATERANGE";
   case BOOL:
     return "BOOLEAN";
   case BYTEA:
@@ -954,6 +1492,64 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     return rand_timetz_value();
   case Column::COLUMN_TYPES::INTERVAL:
     return rand_interval_value();
+  case Column::COLUMN_TYPES::BIT:
+    return rand_bit_value(length, false);
+  case Column::COLUMN_TYPES::VARBIT:
+    return rand_bit_value(length, true);
+  case Column::COLUMN_TYPES::INET:
+    return rand_inet_value();
+  case Column::COLUMN_TYPES::CIDR:
+    return rand_cidr_value();
+  case Column::COLUMN_TYPES::MACADDR:
+    return rand_macaddr_value(false);
+  case Column::COLUMN_TYPES::MACADDR8:
+    return rand_macaddr_value(true);
+  case Column::COLUMN_TYPES::MONEY:
+    return rand_money_value();
+  case Column::COLUMN_TYPES::XML:
+    return rand_xml_value();
+  case Column::COLUMN_TYPES::TSVECTOR:
+    return rand_tsvector_value();
+  case Column::COLUMN_TYPES::TSQUERY:
+    return rand_tsquery_value();
+  case Column::COLUMN_TYPES::POINT:
+    return rand_point_value();
+  case Column::COLUMN_TYPES::LINE:
+    return rand_line_value();
+  case Column::COLUMN_TYPES::LSEG:
+    return rand_lseg_value();
+  case Column::COLUMN_TYPES::BOX:
+    return rand_box_value();
+  case Column::COLUMN_TYPES::PATH:
+    return rand_path_value();
+  case Column::COLUMN_TYPES::POLYGON:
+    return rand_polygon_value();
+  case Column::COLUMN_TYPES::CIRCLE:
+    return rand_circle_value();
+  case Column::COLUMN_TYPES::INTARRAY:
+    return rand_int_array_value();
+  case Column::COLUMN_TYPES::BIGINTARRAY:
+    return rand_bigint_array_value();
+  case Column::COLUMN_TYPES::NUMERICARRAY:
+    return rand_numeric_array_value();
+  case Column::COLUMN_TYPES::TEXTARRAY:
+    return rand_text_array_value();
+  case Column::COLUMN_TYPES::BOOLARRAY:
+    return rand_bool_array_value();
+  case Column::COLUMN_TYPES::TIMESTAMPARRAY:
+    return rand_timestamp_array_value();
+  case Column::COLUMN_TYPES::INT4RANGE:
+    return rand_int4range_value();
+  case Column::COLUMN_TYPES::INT8RANGE:
+    return rand_int8range_value();
+  case Column::COLUMN_TYPES::NUMRANGE:
+    return rand_numrange_value();
+  case Column::COLUMN_TYPES::TSRANGE:
+    return rand_tsrange_value();
+  case Column::COLUMN_TYPES::TSTZRANGE:
+    return rand_tstzrange_value();
+  case Column::COLUMN_TYPES::DATERANGE:
+    return rand_daterange_value();
   case Column::COLUMN_TYPES::CHAR:
   case Column::COLUMN_TYPES::VARCHAR:
     return "\'" + rand_string(length) + "\'";
@@ -1072,6 +1668,95 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
   case INTERVAL:
     name_ = "iv" + name;
     break;
+  case BIT:
+    name_ = "bt" + name;
+    length = rand_int(32, 1);
+    break;
+  case VARBIT:
+    name_ = "vb" + name;
+    length = rand_int(64, 1);
+    break;
+  case INET:
+    name_ = "in" + name;
+    break;
+  case CIDR:
+    name_ = "cd" + name;
+    break;
+  case MACADDR:
+    name_ = "ma" + name;
+    break;
+  case MACADDR8:
+    name_ = "m8" + name;
+    break;
+  case MONEY:
+    name_ = "mo" + name;
+    break;
+  case XML:
+    name_ = "x" + name;
+    break;
+  case TSVECTOR:
+    name_ = "tv" + name;
+    break;
+  case TSQUERY:
+    name_ = "tq" + name;
+    break;
+  case POINT:
+    name_ = "pt" + name;
+    break;
+  case LINE:
+    name_ = "ln" + name;
+    break;
+  case LSEG:
+    name_ = "ls" + name;
+    break;
+  case BOX:
+    name_ = "bx" + name;
+    break;
+  case PATH:
+    name_ = "ph" + name;
+    break;
+  case POLYGON:
+    name_ = "pl" + name;
+    break;
+  case CIRCLE:
+    name_ = "cr" + name;
+    break;
+  case INTARRAY:
+    name_ = "ai" + name;
+    break;
+  case BIGINTARRAY:
+    name_ = "ab" + name;
+    break;
+  case NUMERICARRAY:
+    name_ = "an" + name;
+    break;
+  case TEXTARRAY:
+    name_ = "at" + name;
+    break;
+  case BOOLARRAY:
+    name_ = "ao" + name;
+    break;
+  case TIMESTAMPARRAY:
+    name_ = "ats" + name;
+    break;
+  case INT4RANGE:
+    name_ = "r4" + name;
+    break;
+  case INT8RANGE:
+    name_ = "r8" + name;
+    break;
+  case NUMRANGE:
+    name_ = "rn" + name;
+    break;
+  case TSRANGE:
+    name_ = "rt" + name;
+    break;
+  case TSTZRANGE:
+    name_ = "rz" + name;
+    break;
+  case DATERANGE:
+    name_ = "rd" + name;
+    break;
   case BOOL:
     name_ = "t" + name;
     break;
@@ -1132,6 +1817,42 @@ static std::string pg_generated_numeric_term(const Column *col) {
   case Column::INTERVAL:
     return "(MOD(EXTRACT(EPOCH FROM " + col->name_ +
            ")::BIGINT, 1000000))::INTEGER";
+  case Column::BIT:
+  case Column::VARBIT:
+    return "LENGTH(COALESCE(" + col->name_ + "::TEXT, ''))";
+  case Column::INET:
+  case Column::CIDR:
+  case Column::MACADDR:
+  case Column::MACADDR8:
+    return "LENGTH(COALESCE(" + col->name_ + "::TEXT, ''))";
+  case Column::MONEY:
+    return "ROUND(" + col->name_ + "::NUMERIC)::INTEGER";
+  case Column::XML:
+    return "LENGTH(COALESCE(XMLSERIALIZE(CONTENT " + col->name_ +
+           " AS TEXT), ''))";
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+    return "LENGTH(COALESCE(" + col->name_ + "::TEXT, ''))";
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
+    return "LENGTH(COALESCE(" + col->name_ + "::TEXT, ''))";
   case Column::BOOL:
     return "(CASE WHEN " + col->name_ + " THEN 1 ELSE 0 END)";
   case Column::VARCHAR:
@@ -1190,6 +1911,59 @@ static std::string pg_generated_text_term(const Column *col, int limit,
   case Column::INTERVAL:
     column_size = 24;
     expr = "COALESCE(EXTRACT(EPOCH FROM " + col->name_ + ")::TEXT, '')";
+    break;
+  case Column::BIT:
+  case Column::VARBIT:
+    column_size = std::max(1, col->length);
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::INET:
+  case Column::CIDR:
+    column_size = 43;
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::MACADDR:
+    column_size = 17;
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::MACADDR8:
+    column_size = 23;
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::MONEY:
+    column_size = 32;
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::XML:
+    column_size = 128;
+    expr = "COALESCE(XMLSERIALIZE(CONTENT " + col->name_ + " AS TEXT), '')";
+    break;
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+    column_size = 128;
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
+    break;
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
+    column_size = 128;
+    expr = "COALESCE(" + col->name_ + "::TEXT, '')";
     break;
   case Column::BOOL:
     column_size = 5;
@@ -1268,11 +2042,20 @@ Generated_Column::Generated_Column(std::string name, Table *table)
   size_t columns = rand_int(.6 * table->columns_->size()) + 1;
 
   std::vector<size_t> col_pos; // position of columns
-  while (col_pos.size() < columns) {
+  size_t attempts = 0;
+  while (col_pos.size() < columns && attempts++ < table->columns_->size() * 16) {
     size_t col = rand_int(table->columns_->size() - 1);
-    if (!table->columns_->at(col)->auto_increment &&
-        table->columns_->at(col)->type_ != GENERATED)
+    if (pg_generated_source_column(table->columns_->at(col)))
       col_pos.push_back(col);
+  }
+
+  if (col_pos.empty()) {
+    for (size_t i = 0; i < table->columns_->size(); ++i) {
+      if (pg_generated_source_column(table->columns_->at(i))) {
+        col_pos.push_back(i);
+        break;
+      }
+    }
   }
 
   if (g_type == INT || g_type == INTEGER || g_type == BIGINT ||
@@ -1281,12 +2064,24 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     for (auto pos : col_pos) {
       terms.push_back(pg_generated_numeric_term(table->columns_->at(pos)));
     }
-    str = " " + col_type_to_string(g_type) + " GENERATED ALWAYS AS ((";
-    for (const auto &term : terms) {
-      str += term + " + ";
+    std::string sum_expr = "(";
+    for (const auto &term : terms)
+      sum_expr += term + " + ";
+    sum_expr.erase(sum_expr.length() - 3);
+    sum_expr += ")";
+
+    str = " " + col_type_to_string(g_type) + " GENERATED ALWAYS AS (";
+    if (g_type == SMALLINT) {
+      str += "(MOD((" + sum_expr + ")::NUMERIC, 30000))::SMALLINT";
+    } else if (g_type == INT || g_type == INTEGER) {
+      str += "(MOD((" + sum_expr + ")::NUMERIC, 2000000000))::" +
+             col_type_to_string(g_type);
+    } else if (g_type == BIGINT) {
+      str += "(MOD((" + sum_expr + ")::NUMERIC, 9000000000000000000))::BIGINT";
+    } else {
+      str += "(" + sum_expr + ")::NUMERIC";
     }
-    str.erase(str.length() - 3);
-    str += ")::" + col_type_to_string(g_type) + ") STORED";
+    str += ") STORED";
     return;
   } else if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
     int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
@@ -2211,7 +3006,7 @@ void Table::CreateDefaultColumn() {
       /* loop untill we select some column */
       while (col_type == Column::COLUMN_MAX) {
 
-        auto prob = rand_int(43);
+        auto prob = rand_int(89);
 
         /* intial columns can't be generated columns. also 50% of tables last
          * columns are virtuals */
@@ -2247,15 +3042,73 @@ void Table::CreateDefaultColumn() {
           col_type = Column::TIMESTAMPTZ;
         else if (prob < 36)
           col_type = Column::INTERVAL;
-        else if (!no_blob_col && prob < 38)
-          col_type = Column::BLOB;
-        else if (!no_blob_col && prob < 39)
-          col_type = Column::BYTEA;
-        else if (prob < 41)
-          col_type = Column::BOOL;
+        else if (prob < 37)
+          col_type = Column::BIT;
+        else if (prob < 38)
+          col_type = Column::VARBIT;
+        else if (prob < 40)
+          col_type = Column::INET;
         else if (prob < 42)
-          col_type = Column::JSON;
+          col_type = Column::CIDR;
         else if (prob < 43)
+          col_type = Column::MACADDR;
+        else if (prob < 44)
+          col_type = Column::MACADDR8;
+        else if (prob < 46)
+          col_type = Column::MONEY;
+        else if (prob < 47)
+          col_type = Column::XML;
+        else if (prob < 49)
+          col_type = Column::TSVECTOR;
+        else if (prob < 51)
+          col_type = Column::TSQUERY;
+        else if (prob < 52)
+          col_type = Column::POINT;
+        else if (prob < 53)
+          col_type = Column::LINE;
+        else if (prob < 54)
+          col_type = Column::LSEG;
+        else if (prob < 55)
+          col_type = Column::BOX;
+        else if (prob < 56)
+          col_type = Column::PATH;
+        else if (prob < 57)
+          col_type = Column::POLYGON;
+        else if (prob < 58)
+          col_type = Column::CIRCLE;
+        else if (prob < 60)
+          col_type = Column::INTARRAY;
+        else if (prob < 62)
+          col_type = Column::BIGINTARRAY;
+        else if (prob < 64)
+          col_type = Column::NUMERICARRAY;
+        else if (prob < 66)
+          col_type = Column::TEXTARRAY;
+        else if (prob < 67)
+          col_type = Column::BOOLARRAY;
+        else if (prob < 68)
+          col_type = Column::TIMESTAMPARRAY;
+        else if (prob < 71)
+          col_type = Column::INT4RANGE;
+        else if (prob < 74)
+          col_type = Column::INT8RANGE;
+        else if (prob < 77)
+          col_type = Column::NUMRANGE;
+        else if (prob < 79)
+          col_type = Column::TSRANGE;
+        else if (prob < 81)
+          col_type = Column::TSTZRANGE;
+        else if (prob < 83)
+          col_type = Column::DATERANGE;
+        else if (!no_blob_col && prob < 85)
+          col_type = Column::BLOB;
+        else if (!no_blob_col && prob < 86)
+          col_type = Column::BYTEA;
+        else if (prob < 88)
+          col_type = Column::BOOL;
+        else if (prob < 89)
+          col_type = Column::JSON;
+        else if (prob < 90)
           col_type = Column::JSONB;
         else
           col_type = Column::UUID;
@@ -2684,6 +3537,35 @@ void Table::ModifyColumn(Thd1 *thd) {
     case Column::TIMESTAMP:
     case Column::TIMESTAMPTZ:
     case Column::INTERVAL:
+    case Column::BIT:
+    case Column::VARBIT:
+    case Column::INET:
+    case Column::CIDR:
+    case Column::MACADDR:
+    case Column::MACADDR8:
+    case Column::MONEY:
+    case Column::XML:
+    case Column::TSVECTOR:
+    case Column::TSQUERY:
+    case Column::POINT:
+    case Column::LINE:
+    case Column::LSEG:
+    case Column::BOX:
+    case Column::PATH:
+    case Column::POLYGON:
+    case Column::CIRCLE:
+    case Column::INTARRAY:
+    case Column::BIGINTARRAY:
+    case Column::NUMERICARRAY:
+    case Column::TEXTARRAY:
+    case Column::BOOLARRAY:
+    case Column::TIMESTAMPARRAY:
+    case Column::INT4RANGE:
+    case Column::INT8RANGE:
+    case Column::NUMRANGE:
+    case Column::TSRANGE:
+    case Column::TSTZRANGE:
+    case Column::DATERANGE:
     case Column::BOOL:
     case Column::JSON:
     case Column::JSONB:
@@ -2861,24 +3743,90 @@ void Table::AddColumn(Thd1 *thd) {
   while (col_type == Column::COLUMN_MAX) {
     /* new columns are in ratio of 2:2:2:1:1:1:1:1
      * INT:VARCHAR:CHAR:BOOL:GENERATED:TIMESTAMP:JSON:BLOB */
-    auto prob = rand_int(10);
+    auto prob = rand_int(44);
     if (prob < 1)
       col_type = Column::INTEGER;
     else if (prob < 3)
       col_type = Column::INT;
+    else if (prob < 4)
+      col_type = Column::BIGINT;
     else if (prob < 5)
+      col_type = Column::NUMERIC;
+    else if (prob < 7)
       col_type = Column::VARCHAR;
-    else if (prob < 6)
-      col_type = Column::CHAR;
-    else if (prob < 7 && use_virtual)
-      col_type = Column::GENERATED;
     else if (prob < 8)
-      col_type = Column::BOOL;
-    else if (prob < 9)
-      col_type = Column::TIMESTAMP;
+      col_type = Column::CHAR;
+    else if (prob < 9 && use_virtual)
+      col_type = Column::GENERATED;
     else if (prob < 10)
+      col_type = Column::BOOL;
+    else if (prob < 11)
+      col_type = Column::TIMESTAMP;
+    else if (prob < 12)
+      col_type = Column::DATE;
+    else if (prob < 13)
+      col_type = Column::TIME;
+    else if (prob < 14)
+      col_type = Column::INET;
+    else if (prob < 15)
+      col_type = Column::CIDR;
+    else if (prob < 16)
+      col_type = Column::MACADDR;
+    else if (prob < 17)
+      col_type = Column::MACADDR8;
+    else if (prob < 18)
+      col_type = Column::BIT;
+    else if (prob < 19)
+      col_type = Column::VARBIT;
+    else if (prob < 20)
+      col_type = Column::MONEY;
+    else if (prob < 21)
+      col_type = Column::XML;
+    else if (prob < 22)
+      col_type = Column::TSVECTOR;
+    else if (prob < 23)
+      col_type = Column::TSQUERY;
+    else if (prob < 24)
+      col_type = Column::POINT;
+    else if (prob < 25)
+      col_type = Column::LINE;
+    else if (prob < 26)
+      col_type = Column::LSEG;
+    else if (prob < 27)
+      col_type = Column::BOX;
+    else if (prob < 28)
+      col_type = Column::PATH;
+    else if (prob < 29)
+      col_type = Column::POLYGON;
+    else if (prob < 30)
+      col_type = Column::CIRCLE;
+    else if (prob < 32)
+      col_type = Column::INTARRAY;
+    else if (prob < 33)
+      col_type = Column::BIGINTARRAY;
+    else if (prob < 34)
+      col_type = Column::NUMERICARRAY;
+    else if (prob < 35)
+      col_type = Column::TEXTARRAY;
+    else if (prob < 36)
+      col_type = Column::BOOLARRAY;
+    else if (prob < 37)
+      col_type = Column::TIMESTAMPARRAY;
+    else if (prob < 38)
+      col_type = Column::INT4RANGE;
+    else if (prob < 39)
+      col_type = Column::INT8RANGE;
+    else if (prob < 40)
+      col_type = Column::NUMRANGE;
+    else if (prob < 41)
+      col_type = Column::TSRANGE;
+    else if (prob < 42)
+      col_type = Column::TSTZRANGE;
+    else if (prob < 43)
+      col_type = Column::DATERANGE;
+    else if (prob < 44)
       col_type = Column::JSON;
-    else if (prob < 11 && use_blob)
+    else if (prob < 45 && use_blob)
       col_type = Column::BLOB;
   }
 
@@ -3161,6 +4109,13 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 	      case Column::TIMESTAMP:
 	      case Column::TIMESTAMPTZ:
 	      case Column::INTERVAL:
+	      case Column::BIT:
+	      case Column::VARBIT:
+	      case Column::INET:
+	      case Column::CIDR:
+	      case Column::MACADDR:
+	      case Column::MACADDR8:
+	      case Column::MONEY:
 	      case Column::FLOAT:
 	      case Column::DOUBLE:
 	      case Column::VARCHAR:
@@ -3176,6 +4131,29 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 	          where = col_pos;
 	        break;
 	      case Column::JSON:
+	        break;
+	      case Column::XML:
+	      case Column::TSVECTOR:
+	      case Column::TSQUERY:
+	      case Column::POINT:
+	      case Column::LINE:
+	      case Column::LSEG:
+	      case Column::BOX:
+	      case Column::PATH:
+	      case Column::POLYGON:
+	      case Column::CIRCLE:
+	      case Column::INTARRAY:
+	      case Column::BIGINTARRAY:
+	      case Column::NUMERICARRAY:
+	      case Column::TEXTARRAY:
+	      case Column::BOOLARRAY:
+	      case Column::TIMESTAMPARRAY:
+	      case Column::INT4RANGE:
+	      case Column::INT8RANGE:
+	      case Column::NUMRANGE:
+	      case Column::TSRANGE:
+	      case Column::TSTZRANGE:
+	      case Column::DATERANGE:
 	        break;
       case Column::INTEGER:
         if (rand_int(1000) < 10)
@@ -3234,6 +4212,13 @@ void Table::SelectRandomRow(Thd1 *thd) {
 	    case Column::TIMESTAMP:
 	    case Column::TIMESTAMPTZ:
 	    case Column::INTERVAL:
+	    case Column::BIT:
+	    case Column::VARBIT:
+	    case Column::INET:
+	    case Column::CIDR:
+	    case Column::MACADDR:
+	    case Column::MACADDR8:
+	    case Column::MONEY:
 	    case Column::FLOAT:
 	    case Column::DOUBLE:
 	    case Column::VARCHAR:
@@ -3249,6 +4234,29 @@ void Table::SelectRandomRow(Thd1 *thd) {
 	        where = col_pos;
 	      break;
 	    case Column::JSON:
+	      break;
+	    case Column::XML:
+	    case Column::TSVECTOR:
+	    case Column::TSQUERY:
+	    case Column::POINT:
+	    case Column::LINE:
+	    case Column::LSEG:
+	    case Column::BOX:
+	    case Column::PATH:
+	    case Column::POLYGON:
+	    case Column::CIRCLE:
+	    case Column::INTARRAY:
+	    case Column::BIGINTARRAY:
+	    case Column::NUMERICARRAY:
+	    case Column::TEXTARRAY:
+	    case Column::BOOLARRAY:
+	    case Column::TIMESTAMPARRAY:
+	    case Column::INT4RANGE:
+	    case Column::INT8RANGE:
+	    case Column::NUMRANGE:
+	    case Column::TSRANGE:
+	    case Column::TSTZRANGE:
+	    case Column::DATERANGE:
 	      break;
     case Column::INTEGER:
       if (rand_int(1000) < 10)
@@ -3318,6 +4326,13 @@ void Table::UpdateRandomROW(Thd1 *thd) {
 	    case Column::TIMESTAMP:
 	    case Column::TIMESTAMPTZ:
 	    case Column::INTERVAL:
+	    case Column::BIT:
+	    case Column::VARBIT:
+	    case Column::INET:
+	    case Column::CIDR:
+	    case Column::MACADDR:
+	    case Column::MACADDR8:
+	    case Column::MONEY:
 	    case Column::FLOAT:
 	    case Column::DOUBLE:
 	    case Column::VARCHAR:
@@ -3333,6 +4348,29 @@ void Table::UpdateRandomROW(Thd1 *thd) {
 	        where = col_pos;
 	      break;
 	    case Column::JSON:
+	      break;
+	    case Column::XML:
+	    case Column::TSVECTOR:
+	    case Column::TSQUERY:
+	    case Column::POINT:
+	    case Column::LINE:
+	    case Column::LSEG:
+	    case Column::BOX:
+	    case Column::PATH:
+	    case Column::POLYGON:
+	    case Column::CIRCLE:
+	    case Column::INTARRAY:
+	    case Column::BIGINTARRAY:
+	    case Column::NUMERICARRAY:
+	    case Column::TEXTARRAY:
+	    case Column::BOOLARRAY:
+	    case Column::TIMESTAMPARRAY:
+	    case Column::INT4RANGE:
+	    case Column::INT8RANGE:
+	    case Column::NUMRANGE:
+	    case Column::TSRANGE:
+	    case Column::TSTZRANGE:
+	    case Column::DATERANGE:
 	      break;
     case Column::INTEGER:
       if (rand_int(1000) < 10)
@@ -3510,7 +4548,7 @@ void Table::InsertRandomRow(Thd1 *thd) {
   sql += ") VALUES(" + vals;
   sql += " )";
 
-  if (rand_int(3) != 0) {
+  if (type != TABLE_TYPES::PARTITION && rand_int(3) != 0) {
     auto pk_columns = primary_key_columns(this);
     if (!pk_columns.empty()) {
       sql += " ON CONFLICT (";
@@ -3829,6 +4867,18 @@ static std::string load_metadata_from_file() {
           type.compare("REAL") == 0 || type.compare("DOUBLE") == 0 ||
           type.compare("DOUBLE PRECISION") == 0 ||
           type.compare("INTEGER") == 0 || type.compare("TIMESTAMP") == 0 ||
+          type.compare("TIMESTAMP WITH TIME ZONE") == 0 ||
+          type.compare("TIMESTAMPTZ") == 0 || type.compare("DATE") == 0 ||
+          type.compare("TIME") == 0 || type.compare("TIME WITH TIME ZONE") == 0 ||
+          type.compare("TIMETZ") == 0 || type.compare("INTERVAL") == 0 ||
+          type.compare("SMALLINT") == 0 || type.compare("BIGINT") == 0 ||
+          type.compare("NUMERIC") == 0 || type.compare("BIT") == 0 ||
+          type.compare("BIT VARYING") == 0 || type.compare("VARBIT") == 0 ||
+          type.compare("INET") == 0 || type.compare("CIDR") == 0 ||
+          type.compare("MACADDR") == 0 || type.compare("MACADDR8") == 0 ||
+          type.compare("MONEY") == 0 || type.compare("XML") == 0 ||
+          type.compare("TSVECTOR") == 0 || type.compare("TSQUERY") == 0 ||
+          type.compare("BYTEA") == 0 || type.compare("UUID") == 0 ||
           type.compare("JSON") == 0 || type.compare("JSONB") == 0) {
         a = new Column(col["name"].GetString(), type, table);
       } else if (type.compare("GENERATED") == 0) {
