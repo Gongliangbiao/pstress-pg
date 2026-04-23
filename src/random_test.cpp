@@ -85,21 +85,32 @@ static bool supports_like_predicate(const Column *column) {
     return generated == Column::CHAR || generated == Column::VARCHAR ||
            generated == Column::BLOB;
   }
-  switch (column->type_) {
-  case Column::CHAR:
-  case Column::VARCHAR:
-  case Column::BLOB:
-    return true;
-  case Column::INTEGER:
-  case Column::INT:
-  case Column::FLOAT:
-  case Column::DOUBLE:
-  case Column::TIMESTAMP:
-  case Column::BOOL:
-  case Column::JSON:
-  case Column::GENERATED:
-  case Column::COLUMN_MAX:
-    return false;
+	  switch (column->type_) {
+	  case Column::CHAR:
+	  case Column::VARCHAR:
+	  case Column::BLOB:
+	    return true;
+	  case Column::SMALLINT:
+	  case Column::INTEGER:
+	  case Column::INT:
+	  case Column::BIGINT:
+	  case Column::NUMERIC:
+	  case Column::FLOAT:
+	  case Column::DOUBLE:
+	  case Column::DATE:
+	  case Column::TIME:
+	  case Column::TIMETZ:
+	  case Column::TIMESTAMP:
+	  case Column::TIMESTAMPTZ:
+	  case Column::INTERVAL:
+	  case Column::BOOL:
+	  case Column::BYTEA:
+	  case Column::JSON:
+	  case Column::JSONB:
+	  case Column::UUID:
+	  case Column::GENERATED:
+	  case Column::COLUMN_MAX:
+	    return false;
   }
   return false;
 }
@@ -126,18 +137,30 @@ static int pg_index_width_estimate(const Column *column) {
   switch (column->type_) {
   case Column::BOOL:
     return 1;
+  case Column::SMALLINT:
+    return 2;
   case Column::INT:
   case Column::INTEGER:
+  case Column::BIGINT:
   case Column::FLOAT:
   case Column::DOUBLE:
+  case Column::DATE:
+  case Column::TIME:
+  case Column::TIMETZ:
   case Column::TIMESTAMP:
+  case Column::TIMESTAMPTZ:
+  case Column::INTERVAL:
+  case Column::NUMERIC:
+  case Column::UUID:
     return 8;
   case Column::CHAR:
   case Column::VARCHAR:
     return std::max(1, std::min(column->length, 64));
   case Column::BLOB:
+  case Column::BYTEA:
     return 128;
   case Column::JSON:
+  case Column::JSONB:
     return 128;
   case Column::GENERATED: {
     auto generated =
@@ -145,17 +168,29 @@ static int pg_index_width_estimate(const Column *column) {
     switch (generated) {
     case Column::BOOL:
       return 1;
+    case Column::SMALLINT:
+      return 2;
     case Column::INT:
     case Column::INTEGER:
+    case Column::BIGINT:
     case Column::FLOAT:
     case Column::DOUBLE:
+    case Column::DATE:
+    case Column::TIME:
+    case Column::TIMETZ:
     case Column::TIMESTAMP:
+    case Column::TIMESTAMPTZ:
+    case Column::INTERVAL:
+    case Column::NUMERIC:
+    case Column::UUID:
       return 8;
     case Column::CHAR:
     case Column::VARCHAR:
       return std::max(1, std::min(column->length, 64));
     case Column::BLOB:
+    case Column::BYTEA:
     case Column::JSON:
+    case Column::JSONB:
     case Column::GENERATED:
     case Column::COLUMN_MAX:
       return 128;
@@ -178,7 +213,9 @@ static bool pg_indexable_column(const Column *column) {
 
 static bool pg_fk_referenceable_column(const Column *column) {
   if (column == nullptr || column->type_ == Column::GENERATED ||
-      column->type_ == Column::BLOB || column->type_ == Column::JSON ||
+      column->type_ == Column::BLOB || column->type_ == Column::BYTEA ||
+      column->type_ == Column::JSON || column->type_ == Column::JSONB ||
+      column->type_ == Column::INTERVAL ||
       column->type_ == Column::BOOL) {
     return false;
   }
@@ -592,14 +629,93 @@ static std::string rand_json_value() {
          "}'::jsonb";
 }
 
+static std::string rand_json_text_value() {
+  return "'{\"k\":" + std::to_string(rand_int(100000)) + ",\"s\":\"" +
+         rand_string(12, 3) + "\",\"b\":" + (rand_int(1) == 1 ? "true" : "false") +
+         "}'::json";
+}
+
+static std::string rand_date_value() {
+  int year = rand_int(2040, 2000);
+  int month = rand_int(12, 1);
+  int day = rand_int(28, 1);
+  std::ostringstream out;
+  out << "DATE '" << year << "-" << std::setw(2) << std::setfill('0') << month
+      << "-" << std::setw(2) << std::setfill('0') << day << "'";
+  return out.str();
+}
+
+static std::string rand_time_value() {
+  int hour = rand_int(23, 0);
+  int minute = rand_int(59, 0);
+  int second = rand_int(59, 0);
+  std::ostringstream out;
+  out << "TIME '" << std::setw(2) << std::setfill('0') << hour << ":"
+      << std::setw(2) << std::setfill('0') << minute << ":" << std::setw(2)
+      << std::setfill('0') << second << "'";
+  return out.str();
+}
+
+static std::string rand_timetz_value() {
+  int hour = rand_int(23, 0);
+  int minute = rand_int(59, 0);
+  int second = rand_int(59, 0);
+  int offset = rand_int(12, -12);
+  std::ostringstream out;
+  out << "TIME WITH TIME ZONE '" << std::setw(2) << std::setfill('0') << hour
+      << ":" << std::setw(2) << std::setfill('0') << minute << ":"
+      << std::setw(2) << std::setfill('0') << second
+      << (offset >= 0 ? "+" : "") << offset << "'";
+  return out.str();
+}
+
+static std::string rand_timestamptz_value() {
+  return rand_timestamp_value() + "::timestamptz";
+}
+
+static std::string rand_interval_value() {
+  return "INTERVAL '" + std::to_string(rand_int(3650, 1)) + " seconds'";
+}
+
+static std::string rand_bytea_value() {
+  return "decode('" + rand_string(32, 4) + "', 'escape')";
+}
+
+static std::string rand_uuid_value() {
+  auto hex = [](int len) {
+    static const char *digits = "0123456789abcdef";
+    std::string out;
+    for (int i = 0; i < len; ++i)
+      out += digits[rand_int(15, 0)];
+    return out;
+  };
+  return "'" + hex(8) + "-" + hex(4) + "-4" + hex(3) + "-a" + hex(3) + "-" +
+         hex(12) + "'::uuid";
+}
+
 static std::string deterministic_unique_value(const Column *column, int offset) {
   int value = offset + 1;
   switch (column->type_) {
+  case Column::SMALLINT:
   case Column::INTEGER:
   case Column::INT:
+  case Column::BIGINT:
     return std::to_string(value);
+  case Column::NUMERIC:
+    return std::to_string(value) + ".01";
+  case Column::DATE:
+    return "DATE '2000-01-01' + " + std::to_string(value);
+  case Column::TIME:
+    return "TIME '00:00:00' + INTERVAL '" + std::to_string(value) +
+           " seconds'";
+  case Column::TIMETZ:
+    return "(TIME WITH TIME ZONE '00:00:00+00' + INTERVAL '" +
+           std::to_string(value) + " seconds')";
   case Column::TIMESTAMP:
     return "TIMESTAMP '2000-01-01 00:00:00' + INTERVAL '" +
+           std::to_string(value) + " seconds'";
+  case Column::TIMESTAMPTZ:
+    return "TIMESTAMPTZ '2000-01-01 00:00:00+00' + INTERVAL '" +
            std::to_string(value) + " seconds'";
   case Column::CHAR:
   case Column::VARCHAR: {
@@ -612,9 +728,15 @@ static std::string deterministic_unique_value(const Column *column, int offset) 
     return std::to_string(value) + ".25";
   case Column::DOUBLE:
     return std::to_string(value) + ".125";
+  case Column::UUID:
+    return "'00000000-0000-4000-a000-" + std::to_string(100000000000 + value) +
+           "'::uuid";
   case Column::BOOL:
+  case Column::BYTEA:
   case Column::BLOB:
   case Column::JSON:
+  case Column::JSONB:
+  case Column::INTERVAL:
   case Column::GENERATED:
   case Column::COLUMN_MAX:
     break;
@@ -625,10 +747,24 @@ static std::string deterministic_unique_value(const Column *column, int offset) 
 
 static std::string random_unique_value_expr(const Column *column) {
   switch (column->type_) {
+  case Column::SMALLINT:
+    return "floor(1000 + random() * 30000)::smallint";
   case Column::INTEGER:
   case Column::INT:
     return "floor(100000000 + random() * 1000000000)::int";
+  case Column::BIGINT:
+    return "floor(1000000000000 + random() * 1000000000000)::bigint";
+  case Column::NUMERIC:
+    return "round((100000000 + random() * 1000000000)::numeric, 4)";
+  case Column::DATE:
+    return "DATE '2000-01-01' + floor(random() * 100000)::int";
+  case Column::TIME:
+    return "TIME '00:00:00' + (random() * interval '24 hours')";
+  case Column::TIMETZ:
+    return "TIME WITH TIME ZONE '00:00:00+00' + (random() * interval '24 hours')";
   case Column::TIMESTAMP:
+    return "clock_timestamp() + (random() * interval '100 years')";
+  case Column::TIMESTAMPTZ:
     return "clock_timestamp() + (random() * interval '100 years')";
   case Column::CHAR:
   case Column::VARCHAR:
@@ -638,9 +774,14 @@ static std::string random_unique_value_expr(const Column *column) {
     return "(random() * 1000000000)::real";
   case Column::DOUBLE:
     return "(random() * 1000000000)::double precision";
+  case Column::UUID:
+    return "md5(clock_timestamp()::text || random()::text)::uuid";
   case Column::BOOL:
+  case Column::BYTEA:
   case Column::BLOB:
   case Column::JSON:
+  case Column::JSONB:
+  case Column::INTERVAL:
   case Column::GENERATED:
   case Column::COLUMN_MAX:
     break;
@@ -651,10 +792,16 @@ static std::string random_unique_value_expr(const Column *column) {
 
 /* return column type from a string */
 Column::COLUMN_TYPES Column::col_type(std::string type) {
-  if (type.compare("INTEGER") == 0)
+  if (type.compare("SMALLINT") == 0)
+    return SMALLINT;
+  else if (type.compare("INTEGER") == 0)
     return INTEGER;
   else if (type.compare("INT") == 0)
     return INT;
+  else if (type.compare("BIGINT") == 0)
+    return BIGINT;
+  else if (type.compare("NUMERIC") == 0 || type.compare("DECIMAL") == 0)
+    return NUMERIC;
   else if (type.compare("CHAR") == 0)
     return CHAR;
   else if (type.compare("VARCHAR") == 0)
@@ -677,10 +824,31 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return DOUBLE;
   else if (type.compare("DOUBLE PRECISION") == 0)
     return DOUBLE;
+  else if (type.compare("DATE") == 0)
+    return DATE;
+  else if (type.compare("TIME") == 0 ||
+          type.compare("TIME WITHOUT TIME ZONE") == 0)
+    return TIME;
+  else if (type.compare("TIME WITH TIME ZONE") == 0 ||
+          type.compare("TIMETZ") == 0)
+    return TIMETZ;
   else if (type.compare("TIMESTAMP") == 0)
     return TIMESTAMP;
-  else if (type.compare("JSON") == 0 || type.compare("JSONB") == 0)
+  else if (type.compare("TIMESTAMP WITHOUT TIME ZONE") == 0)
+    return TIMESTAMP;
+  else if (type.compare("TIMESTAMP WITH TIME ZONE") == 0 ||
+          type.compare("TIMESTAMPTZ") == 0)
+    return TIMESTAMPTZ;
+  else if (type.compare("INTERVAL") == 0)
+    return INTERVAL;
+  else if (type.compare("BYTEA") == 0)
+    return BYTEA;
+  else if (type.compare("UUID") == 0)
+    return UUID;
+  else if (type.compare("JSON") == 0)
     return JSON;
+  else if (type.compare("JSONB") == 0)
+    return JSONB;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -689,10 +857,16 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
 /* return string from a column type */
 const std::string Column::col_type_to_string(COLUMN_TYPES type) {
   switch (type) {
+  case SMALLINT:
+    return "SMALLINT";
   case INTEGER:
     return "INTEGER";
   case INT:
     return "INT";
+  case BIGINT:
+    return "BIGINT";
+  case NUMERIC:
+    return "NUMERIC";
   case CHAR:
     return "CHAR";
   case DOUBLE:
@@ -701,14 +875,30 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "REAL";
   case VARCHAR:
     return "VARCHAR";
+  case DATE:
+    return "DATE";
+  case TIME:
+    return "TIME";
+  case TIMETZ:
+    return "TIME WITH TIME ZONE";
   case TIMESTAMP:
     return "TIMESTAMP";
+  case TIMESTAMPTZ:
+    return "TIMESTAMP WITH TIME ZONE";
+  case INTERVAL:
+    return "INTERVAL";
   case BOOL:
     return "BOOLEAN";
+  case BYTEA:
+    return "BYTEA";
   case BLOB:
     return "TEXT";
   case JSON:
+    return "JSON";
+  case JSONB:
     return "JSONB";
+  case UUID:
+    return "UUID";
   case GENERATED:
     return "GENERATED";
   case COLUMN_MAX:
@@ -723,6 +913,9 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
                                         int length) {
   int rand_length;
   switch (type_) {
+  case (Column::COLUMN_TYPES::SMALLINT):
+    return std::to_string(rand_int(32767, 1));
+    break;
   case (Column::COLUMN_TYPES::INTEGER):
     return std::to_string(
         rand_int(options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt()));
@@ -731,6 +924,14 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     return std::to_string(
         rand_int(g_integer_range *
                  options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt()));
+    break;
+  case (Column::COLUMN_TYPES::BIGINT):
+    return std::to_string(static_cast<long long>(rand_int(1000000000, 1)) *
+                          rand_int(1000, 1));
+    break;
+  case (Column::COLUMN_TYPES::NUMERIC):
+    return std::to_string(rand_int(100000, 1)) + "." +
+           std::to_string(rand_int(9999, 0));
     break;
   case (Column::COLUMN_TYPES::FLOAT): {
     return rand_float(options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt());
@@ -743,6 +944,16 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
   }
   case Column::COLUMN_TYPES::TIMESTAMP:
     return rand_timestamp_value();
+  case Column::COLUMN_TYPES::TIMESTAMPTZ:
+    return rand_timestamptz_value();
+  case Column::COLUMN_TYPES::DATE:
+    return rand_date_value();
+  case Column::COLUMN_TYPES::TIME:
+    return rand_time_value();
+  case Column::COLUMN_TYPES::TIMETZ:
+    return rand_timetz_value();
+  case Column::COLUMN_TYPES::INTERVAL:
+    return rand_interval_value();
   case Column::COLUMN_TYPES::CHAR:
   case Column::COLUMN_TYPES::VARCHAR:
     return "\'" + rand_string(length) + "\'";
@@ -755,8 +966,16 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     if (rand_int(10) != 10)
       rand_length /= 10;
     return "\'" + rand_string(rand_length) + "\'";
+  case Column::COLUMN_TYPES::BYTEA:
+    return rand_bytea_value();
   case Column::COLUMN_TYPES::JSON:
+    return rand_json_text_value();
+    break;
+  case Column::COLUMN_TYPES::JSONB:
     return rand_json_value();
+    break;
+  case Column::COLUMN_TYPES::UUID:
+    return rand_uuid_value();
     break;
   case Column::COLUMN_TYPES::GENERATED:
   case Column::COLUMN_TYPES::COLUMN_MAX:
@@ -806,6 +1025,9 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
     : table_(table) {
   type_ = type;
   switch (type) {
+  case SMALLINT:
+    name_ = "si" + name;
+    break;
   case CHAR:
     name_ = "c" + name;
     length = rand_int(g_max_columns_length, 10);
@@ -820,20 +1042,50 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
     if (rand_int(10) == 1)
       length = rand_int(100, 20);
     break;
+  case BIGINT:
+    name_ = "bi" + name;
+    break;
+  case NUMERIC:
+    name_ = "n" + name;
+    break;
   case FLOAT:
     name_ = "f" + name;
     break;
   case DOUBLE:
     name_ = "d" + name;
     break;
+  case DATE:
+    name_ = "dt" + name;
+    break;
+  case TIME:
+    name_ = "tm" + name;
+    break;
+  case TIMETZ:
+    name_ = "tt" + name;
+    break;
   case TIMESTAMP:
     name_ = "ts" + name;
+    break;
+  case TIMESTAMPTZ:
+    name_ = "tz" + name;
+    break;
+  case INTERVAL:
+    name_ = "iv" + name;
     break;
   case BOOL:
     name_ = "t" + name;
     break;
+  case BYTEA:
+    name_ = "ba" + name;
+    break;
   case JSON:
     name_ = "j" + name;
+    break;
+  case JSONB:
+    name_ = "jb" + name;
+    break;
+  case UUID:
+    name_ = "u" + name;
     break;
   default:
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
@@ -858,13 +1110,26 @@ Blob_Column::Blob_Column(std::string name, Table *table, std::string sub_type_)
 
 static std::string pg_generated_numeric_term(const Column *col) {
   switch (col->type_) {
+  case Column::SMALLINT:
   case Column::INT:
   case Column::INTEGER:
+  case Column::BIGINT:
     return col->name_;
+  case Column::NUMERIC:
   case Column::FLOAT:
   case Column::DOUBLE:
     return "ROUND(" + col->name_ + ")::INTEGER";
+  case Column::DATE:
+    return "(MOD((" + col->name_ + " - DATE '2000-01-01'), 1000000))::INTEGER";
+  case Column::TIME:
+  case Column::TIMETZ:
+    return "(MOD(EXTRACT(EPOCH FROM " + col->name_ +
+           ")::BIGINT, 1000000))::INTEGER";
   case Column::TIMESTAMP:
+  case Column::TIMESTAMPTZ:
+    return "(MOD(EXTRACT(EPOCH FROM " + col->name_ +
+           ")::BIGINT, 1000000))::INTEGER";
+  case Column::INTERVAL:
     return "(MOD(EXTRACT(EPOCH FROM " + col->name_ +
            ")::BIGINT, 1000000))::INTEGER";
   case Column::BOOL:
@@ -872,8 +1137,12 @@ static std::string pg_generated_numeric_term(const Column *col) {
   case Column::VARCHAR:
   case Column::CHAR:
   case Column::BLOB:
+  case Column::UUID:
     return "LENGTH(COALESCE(" + col->name_ + "::TEXT, ''))";
+  case Column::BYTEA:
+    return "LENGTH(COALESCE(encode(" + col->name_ + ", 'hex'), ''))";
   case Column::JSON:
+  case Column::JSONB:
     return "COALESCE((" + col->name_ + "->>'k')::INTEGER, 0)";
   case Column::GENERATED:
   case Column::COLUMN_MAX:
@@ -888,8 +1157,11 @@ static std::string pg_generated_text_term(const Column *col, int limit,
   std::string expr;
   int column_size = 0;
   switch (col->type_) {
+  case Column::SMALLINT:
   case Column::INT:
   case Column::INTEGER:
+  case Column::BIGINT:
+  case Column::NUMERIC:
     column_size = 10;
     expr = "COALESCE(" + col->name_ + "::TEXT, '')";
     break;
@@ -898,10 +1170,26 @@ static std::string pg_generated_text_term(const Column *col, int limit,
     column_size = 10;
     expr = "COALESCE(" + col->name_ + "::TEXT, '')";
     break;
+  case Column::DATE:
+    column_size = 10;
+    expr = "COALESCE((MOD((" + col->name_ +
+           " - DATE '2000-01-01'), 1000000))::TEXT, '')";
+    break;
+  case Column::TIME:
+  case Column::TIMETZ:
+    column_size = 15;
+    expr = "COALESCE((MOD(EXTRACT(EPOCH FROM " + col->name_ +
+           ")::BIGINT, 1000000))::TEXT, '')";
+    break;
   case Column::TIMESTAMP:
+  case Column::TIMESTAMPTZ:
     column_size = 19;
     expr = "COALESCE((MOD(EXTRACT(EPOCH FROM " + col->name_ +
            ")::BIGINT, 1000000))::TEXT, '')";
+    break;
+  case Column::INTERVAL:
+    column_size = 24;
+    expr = "COALESCE(EXTRACT(EPOCH FROM " + col->name_ + ")::TEXT, '')";
     break;
   case Column::BOOL:
     column_size = 5;
@@ -914,9 +1202,18 @@ static std::string pg_generated_text_term(const Column *col, int limit,
     break;
   case Column::BLOB:
     column_size = 5000;
+    expr = "COALESCE(" + col->name_ + ", '')";
+    break;
+  case Column::BYTEA:
+    column_size = 5000;
+    expr = "COALESCE(encode(" + col->name_ + ", 'hex'), '')";
+    break;
+  case Column::UUID:
+    column_size = 36;
     expr = "COALESCE(" + col->name_ + "::TEXT, '')";
     break;
   case Column::JSON:
+  case Column::JSONB:
     column_size = 128;
     expr = "COALESCE(" + col->name_ + "->>'s', '')";
     break;
@@ -949,16 +1246,20 @@ Generated_Column::Generated_Column(std::string name, Table *table)
   name_ = "g" + name;
   auto blob_supported = !options->at(Option::NO_BLOB)->getBool();
   g_type = COLUMN_MAX;
-  /* Generated columns are 2:2:2:2 (INT:VARCHAR:CHAR:BLOB) */
+  /* Generated columns keep to stable scalar/text results. */
   while (g_type == COLUMN_MAX) {
-    auto x = rand_int(4, 1);
+    auto x = rand_int(6, 1);
     if (x <= 1)
       g_type = INT;
     else if (x <= 2)
-      g_type = VARCHAR;
+      g_type = BIGINT;
     else if (x <= 3)
+      g_type = NUMERIC;
+    else if (x <= 4)
+      g_type = VARCHAR;
+    else if (x <= 5)
       g_type = CHAR;
-    else if (blob_supported && x <= 4) {
+    else if (blob_supported && x <= 6) {
       g_type = BLOB;
     }
   }
@@ -974,7 +1275,8 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       col_pos.push_back(col);
   }
 
-  if (g_type == INT || g_type == INTEGER) {
+  if (g_type == INT || g_type == INTEGER || g_type == BIGINT ||
+      g_type == SMALLINT || g_type == NUMERIC) {
     std::vector<std::string> terms;
     for (auto pos : col_pos) {
       terms.push_back(pg_generated_numeric_term(table->columns_->at(pos)));
@@ -984,7 +1286,7 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       str += term + " + ";
     }
     str.erase(str.length() - 3);
-    str += ")::INTEGER) STORED";
+    str += ")::" + col_type_to_string(g_type) + ") STORED";
     return;
   } else if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
     int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
@@ -1909,33 +2211,54 @@ void Table::CreateDefaultColumn() {
       /* loop untill we select some column */
       while (col_type == Column::COLUMN_MAX) {
 
-        /* columns are 6:1:2:2:4:2:1:1 INT:INTEGER:FLOAT:DOUBLE:VARCHAR:CHAR:TIMESTAMP:BOOL plus JSON/BLOB */
-        auto prob = rand_int(23);
+        auto prob = rand_int(43);
 
         /* intial columns can't be generated columns. also 50% of tables last
          * columns are virtuals */
         if (!no_virtual_col && i >= .8 * max_columns && rand_int(1) == 1)
           col_type = Column::GENERATED;
-        else if (prob < 5)
-          col_type = Column::INT;
-        else if (prob < 6)
-          col_type = Column::INTEGER;
+        else if (prob < 3)
+          col_type = Column::SMALLINT;
         else if (prob < 8)
-          col_type = Column::FLOAT;
-        else if (prob < 10)
-          col_type = Column::DOUBLE;
-        else if (prob < 14)
-          col_type = Column::VARCHAR;
-        else if (prob < 16)
-          col_type = Column::CHAR;
+          col_type = Column::INT;
+        else if (prob < 9)
+          col_type = Column::INTEGER;
+        else if (prob < 12)
+          col_type = Column::BIGINT;
+        else if (prob < 15)
+          col_type = Column::NUMERIC;
         else if (prob < 17)
-          col_type = Column::TIMESTAMP;
-        else if (!no_blob_col && prob < 19)
-          col_type = Column::BLOB;
-        else if (prob < 21)
-          col_type = Column::BOOL;
+          col_type = Column::FLOAT;
+        else if (prob < 19)
+          col_type = Column::DOUBLE;
         else if (prob < 23)
+          col_type = Column::VARCHAR;
+        else if (prob < 25)
+          col_type = Column::CHAR;
+        else if (prob < 27)
+          col_type = Column::DATE;
+        else if (prob < 29)
+          col_type = Column::TIME;
+        else if (prob < 30)
+          col_type = Column::TIMETZ;
+        else if (prob < 32)
+          col_type = Column::TIMESTAMP;
+        else if (prob < 34)
+          col_type = Column::TIMESTAMPTZ;
+        else if (prob < 36)
+          col_type = Column::INTERVAL;
+        else if (!no_blob_col && prob < 38)
+          col_type = Column::BLOB;
+        else if (!no_blob_col && prob < 39)
+          col_type = Column::BYTEA;
+        else if (prob < 41)
+          col_type = Column::BOOL;
+        else if (prob < 42)
           col_type = Column::JSON;
+        else if (prob < 43)
+          col_type = Column::JSONB;
+        else
+          col_type = Column::UUID;
       }
 
       if (col_type == Column::GENERATED)
@@ -2345,15 +2668,26 @@ void Table::ModifyColumn(Thd1 *thd) {
     auto col1 = columns_->at(rand_int(columns_->size() - 1));
     switch (col1->type_) {
     case Column::BLOB:
+    case Column::BYTEA:
     case Column::VARCHAR:
     case Column::CHAR:
+    case Column::SMALLINT:
     case Column::FLOAT:
     case Column::DOUBLE:
     case Column::INT:
     case Column::INTEGER:
+    case Column::BIGINT:
+    case Column::NUMERIC:
+    case Column::DATE:
+    case Column::TIME:
+    case Column::TIMETZ:
     case Column::TIMESTAMP:
+    case Column::TIMESTAMPTZ:
+    case Column::INTERVAL:
     case Column::BOOL:
     case Column::JSON:
+    case Column::JSONB:
+    case Column::UUID:
       col = col1;
       col_pos = static_cast<size_t>(std::distance(columns_->begin(),
                                                   std::find(columns_->begin(),
@@ -2813,24 +3147,36 @@ void Table::DeleteRandomRow(Thd1 *thd) {
     while (where < 0) {
       auto col_pos = rand_int(columns_->size() - 1);
       switch (columns_->at(col_pos)->type_) {
-      case Column::BOOL:
-        if (only_bool || rand_int(1000) == 0)
-          where = col_pos;
-        break;
-      case Column::INT:
-      case Column::TIMESTAMP:
-      case Column::FLOAT:
-      case Column::DOUBLE:
-      case Column::VARCHAR:
-      case Column::CHAR:
-      case Column::BLOB:
-      case Column::GENERATED:
-        where = col_pos;
-        break;
-      case Column::JSON:
-        if (rand_int(1000) < 50)
-          where = col_pos;
-        break;
+	      case Column::BOOL:
+	        if (only_bool || rand_int(1000) == 0)
+	          where = col_pos;
+	        break;
+	      case Column::SMALLINT:
+	      case Column::INT:
+	      case Column::BIGINT:
+	      case Column::NUMERIC:
+	      case Column::DATE:
+	      case Column::TIME:
+	      case Column::TIMETZ:
+	      case Column::TIMESTAMP:
+	      case Column::TIMESTAMPTZ:
+	      case Column::INTERVAL:
+	      case Column::FLOAT:
+	      case Column::DOUBLE:
+	      case Column::VARCHAR:
+	      case Column::CHAR:
+	      case Column::BLOB:
+	      case Column::BYTEA:
+	      case Column::UUID:
+	      case Column::GENERATED:
+	        where = col_pos;
+	        break;
+	      case Column::JSONB:
+	        if (rand_int(1000) < 50)
+	          where = col_pos;
+	        break;
+	      case Column::JSON:
+	        break;
       case Column::INTEGER:
         if (rand_int(1000) < 10)
           where = col_pos;
@@ -2874,24 +3220,36 @@ void Table::SelectRandomRow(Thd1 *thd) {
   while (where < 0) {
     auto col_pos = rand_int(columns_->size() - 1);
     switch (columns_->at(col_pos)->type_) {
-    case Column::BOOL:
-      if (rand_int(1000) < 10)
-        where = col_pos;
-      break;
-    case Column::INT:
-    case Column::TIMESTAMP:
-    case Column::FLOAT:
-    case Column::DOUBLE:
-    case Column::VARCHAR:
-    case Column::CHAR:
-    case Column::BLOB:
-    case Column::GENERATED:
-      where = col_pos;
-      break;
-    case Column::JSON:
-      if (rand_int(1000) < 50)
-        where = col_pos;
-      break;
+	    case Column::BOOL:
+	      if (rand_int(1000) < 10)
+	        where = col_pos;
+	      break;
+	    case Column::SMALLINT:
+	    case Column::INT:
+	    case Column::BIGINT:
+	    case Column::NUMERIC:
+	    case Column::DATE:
+	    case Column::TIME:
+	    case Column::TIMETZ:
+	    case Column::TIMESTAMP:
+	    case Column::TIMESTAMPTZ:
+	    case Column::INTERVAL:
+	    case Column::FLOAT:
+	    case Column::DOUBLE:
+	    case Column::VARCHAR:
+	    case Column::CHAR:
+	    case Column::BLOB:
+	    case Column::BYTEA:
+	    case Column::UUID:
+	    case Column::GENERATED:
+	      where = col_pos;
+	      break;
+	    case Column::JSONB:
+	      if (rand_int(1000) < 50)
+	        where = col_pos;
+	      break;
+	    case Column::JSON:
+	      break;
     case Column::INTEGER:
       if (rand_int(1000) < 10)
         where = col_pos;
@@ -2946,24 +3304,36 @@ void Table::UpdateRandomROW(Thd1 *thd) {
   while (where < 0) {
     auto col_pos = rand_int(columns_->size() - 1);
     switch (columns_->at(col_pos)->type_) {
-    case Column::BOOL:
-      if (rand_int(1000) < 10)
-        where = col_pos;
-      break;
-    case Column::INT:
-    case Column::TIMESTAMP:
-    case Column::FLOAT:
-    case Column::DOUBLE:
-    case Column::VARCHAR:
-    case Column::CHAR:
-    case Column::BLOB:
-    case Column::GENERATED:
-      where = col_pos;
-      break;
-    case Column::JSON:
-      if (rand_int(1000) < 50)
-        where = col_pos;
-      break;
+	    case Column::BOOL:
+	      if (rand_int(1000) < 10)
+	        where = col_pos;
+	      break;
+	    case Column::SMALLINT:
+	    case Column::INT:
+	    case Column::BIGINT:
+	    case Column::NUMERIC:
+	    case Column::DATE:
+	    case Column::TIME:
+	    case Column::TIMETZ:
+	    case Column::TIMESTAMP:
+	    case Column::TIMESTAMPTZ:
+	    case Column::INTERVAL:
+	    case Column::FLOAT:
+	    case Column::DOUBLE:
+	    case Column::VARCHAR:
+	    case Column::CHAR:
+	    case Column::BLOB:
+	    case Column::BYTEA:
+	    case Column::UUID:
+	    case Column::GENERATED:
+	      where = col_pos;
+	      break;
+	    case Column::JSONB:
+	      if (rand_int(1000) < 50)
+	        where = col_pos;
+	      break;
+	    case Column::JSON:
+	      break;
     case Column::INTEGER:
       if (rand_int(1000) < 10)
         where = col_pos;

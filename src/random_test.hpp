@@ -44,16 +44,27 @@ public:
   enum COLUMN_TYPES {
     /* interger type columns are small ints. they are used for LIST
              PARTITION */
+    SMALLINT,
     INTEGER,
     INT,
+    BIGINT,
+    NUMERIC,
     CHAR,
     VARCHAR,
     FLOAT,
     DOUBLE,
+    DATE,
+    TIME,
+    TIMETZ,
     TIMESTAMP,
+    TIMESTAMPTZ,
+    INTERVAL,
     BOOL,
+    BYTEA,
     BLOB,
     JSON,
+    JSONB,
+    UUID,
     GENERATED,
     COLUMN_MAX // should be last
   } type_;

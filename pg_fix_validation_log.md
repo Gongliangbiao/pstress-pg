@@ -203,3 +203,42 @@
 - Remaining failures: FK conflicts (`23503`), duplicate unique/primary values
   (`23505`), deadlocks (`40P01`), and transaction-abort follow-up errors
   (`25P02`).
+
+## 2026-04-23 - Iteration 6: add P0 PostgreSQL scalar data types
+
+### Scope
+
+- Added PostgreSQL scalar column types to random metadata generation:
+  `SMALLINT`, `BIGINT`, `NUMERIC`, `DATE`, `TIME`, `TIME WITH TIME ZONE`,
+  `TIMESTAMP WITH TIME ZONE`, `INTERVAL`, `BYTEA`, `UUID`, and `JSONB`.
+- Split PostgreSQL `JSON` and `JSONB` behavior instead of treating all JSON
+  columns as one type.
+- Added value generators, deterministic unique expressions, DML update/delete
+  handling, index-width estimates, and generated-column expression support for
+  the new type family.
+- Avoided selecting `JSON` columns for equality predicates because PostgreSQL
+  `json` has no equality operator; `JSONB` remains eligible for predicate use.
+- Kept generated-column expressions immutable for date/time/binary/text-derived
+  terms by avoiding non-immutable casts where PostgreSQL rejects them.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted smoke: `--tables=4 --threads=1 --seconds=30 --columns=12
+  --indexes=4`
+- Targeted smoke result: completed with exit code `0`; no `syntax error`,
+  `FATAL`, `42883`, `42P17`, or `22008` structural type-generation failures.
+- Smoke summary: `274/134060` queries failed, `99.80%` successful.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180 --columns=12
+  --indexes=4`
+- Result: completed with exit code `0`
+- Summary: `258/241196` queries failed, `99.89%` successful
+- Confirmed DDL/value coverage in this random sample: `BIGINT`, `NUMERIC`,
+  `DATE`, `TIME`, `UUID`, and `JSON`.
+- Added but not sampled by this particular 3-minute random run: `SMALLINT`,
+  `TIME WITH TIME ZONE`, `TIMESTAMP WITH TIME ZONE`, `INTERVAL`, `BYTEA`, and
+  `JSONB`.
+- Remaining failures: FK conflicts (`23503`), duplicate unique/primary values
+  (`23505`), deadlocks (`40P01`), transaction-abort follow-up errors (`25P02`),
+  and one random check/partition constraint miss (`23514`).
