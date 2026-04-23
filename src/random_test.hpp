@@ -93,6 +93,7 @@ public:
   std::string default_value;
   bool primary_key = false;
   bool auto_increment = false;
+  bool referenced_key = false;
   bool compressed = false; // percona type compressed
   std::vector<int> unique_values;
   Table *table_;
@@ -144,6 +145,7 @@ struct Index {
 
   std::string name_;
   std::vector<Ind_col *> *columns_;
+  bool unique = false;
 };
 
 struct Thd1 {
@@ -273,7 +275,13 @@ struct FK_table : Table {
   /* current only used for step 1. So we do not store in metadata.
    Used to get distince keys of pkey table */
   Table* parent;
+  Column *parent_key = nullptr;
+  Column *child_key = nullptr;
+  std::string parent_key_name;
+  std::string child_key_name;
   bool load_fk_constraint(Thd1 *thd);
+  bool configure_reference();
+  bool resolve_reference_columns();
 
   void pickRefrence(Table *table) {
     on_delete = getRandomForeignKeyAction(table);

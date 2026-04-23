@@ -168,3 +168,38 @@
 - Summary: `346/1045435` queries failed, `99.97%` successful
 - Remaining failures: duplicate primary keys (`23505`), FK conflicts (`23503`),
   transaction-abort follow-up errors (`25P02`), and deadlocks (`40P01`).
+
+## 2026-04-23 - Iteration 5: decouple PostgreSQL FK references from INT primary keys
+
+### Scope
+
+- Added explicit FK reference metadata on `FK_table`: parent table, parent
+  referenced column, and child FK column.
+- Changed FK generation from fixed `ifk_col INTEGER REFERENCES parent(pkey)` to
+  single-column PostgreSQL-compatible references.
+- FK parent references can now target either a primary-key column or a generated
+  unique index on a regular indexable column.
+- FK child columns now copy the parent reference column type and length, so
+  cases such as `VARCHAR` FK columns are covered.
+- Initial load generates deterministic unique values for non-primary referenced
+  columns so parent unique indexes can be created reliably.
+- Random insert/update values for referenced unique columns use lower-collision
+  expressions, and FK-supporting unique indexes are not selected for random
+  `DROP INDEX`.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted smoke: `--tables=3 --threads=1 --seconds=30 --fk-prob=100
+  --pk-prob=0 --columns=8 --indexes=4`
+- Targeted smoke result: completed with exit code `0`; generated non-PK FK DDL
+  such as `FOREIGN KEY (vfk_col) REFERENCES tt_1 (v2)`.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180`
+- Result: completed with exit code `0`
+- Summary: `450/347266` queries failed, `99.87%` successful
+- Confirmed DDL: `CREATE UNIQUE INDEX tt_1_fkref_v2 ON tt_1(v2)` and
+  `FOREIGN KEY (vfk_col) REFERENCES tt_1 (v2)`.
+- Remaining failures: FK conflicts (`23503`), duplicate unique/primary values
+  (`23505`), deadlocks (`40P01`), and transaction-abort follow-up errors
+  (`25P02`).

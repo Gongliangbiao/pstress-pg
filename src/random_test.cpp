@@ -167,8 +167,26 @@ static int pg_index_width_estimate(const Column *column) {
   return 128;
 }
 
+static bool fk_supporting_index(const Index *index) {
+  return index != nullptr && index->unique && index->columns_->size() == 1 &&
+         index->columns_->front()->column->referenced_key;
+}
+
 static bool pg_indexable_column(const Column *column) {
   return pg_index_width_estimate(column) <= 64;
+}
+
+static bool pg_fk_referenceable_column(const Column *column) {
+  if (column == nullptr || column->type_ == Column::GENERATED ||
+      column->type_ == Column::BLOB || column->type_ == Column::JSON ||
+      column->type_ == Column::BOOL) {
+    return false;
+  }
+  if ((column->type_ == Column::CHAR || column->type_ == Column::VARCHAR) &&
+      column->length < 8) {
+    return false;
+  }
+  return pg_indexable_column(column);
 }
 
 static int pg_index_total_width(const Index *index) {
@@ -574,6 +592,63 @@ static std::string rand_json_value() {
          "}'::jsonb";
 }
 
+static std::string deterministic_unique_value(const Column *column, int offset) {
+  int value = offset + 1;
+  switch (column->type_) {
+  case Column::INTEGER:
+  case Column::INT:
+    return std::to_string(value);
+  case Column::TIMESTAMP:
+    return "TIMESTAMP '2000-01-01 00:00:00' + INTERVAL '" +
+           std::to_string(value) + " seconds'";
+  case Column::CHAR:
+  case Column::VARCHAR: {
+    std::string text = "fk" + std::to_string(value);
+    if (column->length > 0 && static_cast<int>(text.size()) > column->length)
+      text = text.substr(0, column->length);
+    return "'" + text + "'";
+  }
+  case Column::FLOAT:
+    return std::to_string(value) + ".25";
+  case Column::DOUBLE:
+    return std::to_string(value) + ".125";
+  case Column::BOOL:
+  case Column::BLOB:
+  case Column::JSON:
+  case Column::GENERATED:
+  case Column::COLUMN_MAX:
+    break;
+  }
+  throw std::runtime_error("unhandled unique value type " +
+                           Column::col_type_to_string(column->type_));
+}
+
+static std::string random_unique_value_expr(const Column *column) {
+  switch (column->type_) {
+  case Column::INTEGER:
+  case Column::INT:
+    return "floor(100000000 + random() * 1000000000)::int";
+  case Column::TIMESTAMP:
+    return "clock_timestamp() + (random() * interval '100 years')";
+  case Column::CHAR:
+  case Column::VARCHAR:
+    return "substr(md5(clock_timestamp()::text || random()::text), 1, " +
+           std::to_string(std::max(1, column->length)) + ")";
+  case Column::FLOAT:
+    return "(random() * 1000000000)::real";
+  case Column::DOUBLE:
+    return "(random() * 1000000000)::double precision";
+  case Column::BOOL:
+  case Column::BLOB:
+  case Column::JSON:
+  case Column::GENERATED:
+  case Column::COLUMN_MAX:
+    break;
+  }
+  throw std::runtime_error("unhandled random unique value type " +
+                           Column::col_type_to_string(column->type_));
+}
+
 /* return column type from a string */
 Column::COLUMN_TYPES Column::col_type(std::string type) {
   if (type.compare("INTEGER") == 0)
@@ -958,6 +1033,8 @@ template <typename Writer> void Column::Serialize(Writer &writer) const {
   writer.Bool(null);
   writer.String("primary_key");
   writer.Bool(primary_key);
+  writer.String("referenced_key");
+  writer.Bool(referenced_key);
   writer.String("compressed");
   writer.Bool(compressed);
   writer.String("auto_increment");
@@ -998,6 +1075,8 @@ template <typename Writer> void Index::Serialize(Writer &writer) const {
   writer.StartObject();
   writer.String("name");
   writer.String(name_.c_str(), static_cast<SizeType>(name_.length()));
+  writer.String("unique");
+  writer.Bool(unique);
   writer.String(("index_columns"));
   writer.StartArray();
   for (auto ic : *columns_)
@@ -1027,10 +1106,12 @@ static std::string metadata_string_member(const rapidjson::Value &obj,
                                               std::string()) {
   if (const auto *value = json_string_member(obj, new_key))
     return value;
-  if (const auto *value = json_string_member(obj, legacy_key)) {
-    if (!legacy_default.empty() && value == legacy_default)
-      return "";
-    return value;
+  if (legacy_key != nullptr) {
+    if (const auto *value = json_string_member(obj, legacy_key)) {
+      if (!legacy_default.empty() && value == legacy_default)
+        return "";
+      return value;
+    }
   }
   return "";
 }
@@ -1043,6 +1124,10 @@ static int metadata_int_member(const rapidjson::Value &obj, const char *new_key,
       obj[legacy_key].IsInt())
     return obj[legacy_key].GetInt();
   return 0;
+}
+
+static bool metadata_bool_member(const rapidjson::Value &obj, const char *key) {
+  return obj.HasMember(key) && obj[key].IsBool() && obj[key].GetBool();
 }
 
 template <typename Writer> void Table::Serialize(Writer &writer) const {
@@ -1092,8 +1177,16 @@ template <typename Writer> void Table::Serialize(Writer &writer) const {
     std::string parent = fk_table->parent->name_;
     std::string on_update = fk_table->enumToString(fk_table->on_update);
     std::string on_delete = fk_table->enumToString(fk_table->on_delete);
+    std::string parent_key =
+        fk_table->parent_key != nullptr ? fk_table->parent_key->name_ : "";
+    std::string child_key =
+        fk_table->child_key != nullptr ? fk_table->child_key->name_ : "";
     writer.String("parent");
     writer.String(parent.c_str(), static_cast<SizeType>(parent.length()));
+    writer.String("parent_key");
+    writer.String(parent_key.c_str(), static_cast<SizeType>(parent_key.length()));
+    writer.String("child_key");
+    writer.String(child_key.c_str(), static_cast<SizeType>(child_key.length()));
     writer.String("on_update");
     writer.String(on_update.c_str(), static_cast<SizeType>(on_update.length()));
     writer.String("on_delete");
@@ -1180,7 +1273,8 @@ static std::string index_column_list(const Index *index) {
 }
 
 static std::string create_index_sql(const Table *table, const Index *index) {
-  return "CREATE INDEX " + index->name_ + " ON " + table->name_ + "(" +
+  return "CREATE " + std::string(index->unique ? "UNIQUE " : "") + "INDEX " +
+         index->name_ + " ON " + table->name_ + "(" +
          index_column_list(index) + ")";
 }
 
@@ -1194,6 +1288,46 @@ static std::vector<Column *> primary_key_columns(const Table *table) {
   return pk_columns;
 }
 
+static Column *find_column_by_name(Table *table, const std::string &name) {
+  if (table == nullptr)
+    return nullptr;
+  for (auto *col : *table->columns_) {
+    if (col->name_ == name)
+      return col;
+  }
+  return nullptr;
+}
+
+static Column *pick_fk_parent_key(Table *parent) {
+  std::vector<Column *> unique_candidates;
+  std::vector<Column *> pk_candidates;
+
+  for (auto *col : *parent->columns_) {
+    if (!pg_fk_referenceable_column(col))
+      continue;
+    if (col->primary_key)
+      pk_candidates.push_back(col);
+    else
+      unique_candidates.push_back(col);
+  }
+
+  if (!unique_candidates.empty() &&
+      (pk_candidates.empty() || rand_int(1) == 0)) {
+    return unique_candidates.at(rand_int(unique_candidates.size() - 1));
+  }
+  if (!pk_candidates.empty()) {
+    return pk_candidates.at(rand_int(pk_candidates.size() - 1));
+  }
+  return nullptr;
+}
+
+static Column *make_fk_child_key(Column *parent_key, Table *child) {
+  auto *child_key = new Column("fk_col", child, parent_key->type_);
+  child_key->length = parent_key->length;
+  child_key->null = false;
+  return child_key;
+}
+
 static std::string fk_reference_value_expr(const Table *table) {
   if (table == nullptr || table->type != Table::FK) {
     return "";
@@ -1204,12 +1338,11 @@ static std::string fk_reference_value_expr(const Table *table) {
     return "NULL";
   }
 
-  auto pk_columns = primary_key_columns(fk_table->parent);
-  if (pk_columns.empty()) {
+  if (fk_table->parent_key == nullptr) {
     return "NULL";
   }
 
-  return "(SELECT " + pk_columns.front()->name_ + " FROM " +
+  return "(SELECT " + fk_table->parent_key->name_ + " FROM " +
          fk_table->parent->name_ + " ORDER BY random() LIMIT 1)";
 }
 
@@ -1337,20 +1470,18 @@ bool Table::load_secondary_indexes(Thd1 *thd) {
 }
 
 bool FK_table::load_fk_constraint(Thd1 *thd) {
+  if (!resolve_reference_columns()) {
+    thd->thread_log << "Failed to resolve fk reference columns for " << name_
+                    << std::endl;
+    run_query_failed = true;
+    return false;
+  }
 
   std::string constraint = name_ + "_" + parent->name_;
-  std::string pk;
-  for (const auto &col : *parent->columns_) {
-    if (col->primary_key == true) {
-      pk = col->name_;
-      break;
-    }
-  }
-  assert(pk.size() > 0);
 
   std::string sql = "ALTER TABLE " + name_ + " ADD CONSTRAINT " + constraint +
-                    " FOREIGN KEY (ifk_col) REFERENCES " + parent->name_ +
-                    " (" + pk + ")";
+                    " FOREIGN KEY (" + child_key->name_ + ") REFERENCES " +
+                    parent->name_ + " (" + parent_key->name_ + ")";
   sql += " ON UPDATE " + enumToString(on_update);
   sql += " ON DELETE  " + enumToString(on_delete);
 
@@ -1360,6 +1491,62 @@ bool FK_table::load_fk_constraint(Thd1 *thd) {
     run_query_failed = true;
     return false;
   }
+  return true;
+}
+
+bool FK_table::resolve_reference_columns() {
+  if (parent == nullptr)
+    return false;
+
+  if (parent_key == nullptr && !parent_key_name.empty())
+    parent_key = find_column_by_name(parent, parent_key_name);
+  if (child_key == nullptr && !child_key_name.empty())
+    child_key = find_column_by_name(this, child_key_name);
+
+  if (parent_key == nullptr || child_key == nullptr) {
+    auto pk_columns = primary_key_columns(parent);
+    if (parent_key == nullptr && !pk_columns.empty())
+      parent_key = pk_columns.front();
+    if (child_key == nullptr) {
+      for (auto *col : *columns_) {
+        if (col->name_.find("fk_col") != std::string::npos) {
+          child_key = col;
+          break;
+        }
+      }
+    }
+  }
+
+  if (parent_key == nullptr || child_key == nullptr)
+    return false;
+
+  parent_key_name = parent_key->name_;
+  child_key_name = child_key->name_;
+  return true;
+}
+
+bool FK_table::configure_reference() {
+  if (parent == nullptr)
+    return false;
+
+  parent_key = pick_fk_parent_key(parent);
+  if (parent_key == nullptr)
+    return false;
+
+  child_key = make_fk_child_key(parent_key, this);
+  AddInternalColumn(child_key);
+  parent_key_name = parent_key->name_;
+  child_key_name = child_key->name_;
+
+  if (!parent_key->primary_key) {
+    parent_key->referenced_key = true;
+    auto *unique_index =
+        new Index(parent->name_ + "_fkref_" + parent_key->name_);
+    unique_index->unique = true;
+    unique_index->AddInternalColumn(new Ind_col(parent_key, false));
+    parent->AddInternalIndex(unique_index);
+  }
+
   return true;
 }
 
@@ -1674,12 +1861,6 @@ Table::~Table() {
 void Table::CreateDefaultColumn() {
   auto no_auto_inc = opt_bool(NO_AUTO_INC);
   bool has_auto_increment = false;
-
-  if (type == FK) {
-    std::string name = "fk_col";
-    Column::COLUMN_TYPES type = Column::INTEGER;
-    AddInternalColumn(new Column{name, this, type});
-  }
 
   /* if table is partition add new column */
   if (type == PARTITION) {
@@ -1999,10 +2180,14 @@ void generate_metadata_for_tables() {
         /* Create FK table */
         if (!options->at(Option::NO_FK)->getBool() &&
             options->at(Option::FK_PROB)->getInt() > rand_int(100) &&
-            parent_table->has_pk()) {
+            pick_fk_parent_key(parent_table) != nullptr) {
           auto child_table = Table::table_id(Table::FK, i);
           all_tables->push_back(child_table);
           static_cast<FK_table *>(child_table)->parent = parent_table;
+          if (!static_cast<FK_table *>(child_table)->configure_reference()) {
+            all_tables->pop_back();
+            delete child_table;
+          }
         }
       }
 
@@ -2416,7 +2601,16 @@ void Table::AddColumn(Thd1 *thd) {
 void Table::DropIndex(Thd1 *thd) {
   table_mutex.lock();
   if (indexes_ != nullptr && indexes_->size() > 0) {
-    auto index = indexes_->at(rand_int(indexes_->size() - 1));
+    std::vector<Index *> droppable_indexes;
+    for (auto *index : *indexes_) {
+      if (!fk_supporting_index(index))
+        droppable_indexes.push_back(index);
+    }
+    if (droppable_indexes.empty()) {
+      table_mutex.unlock();
+      return;
+    }
+    auto index = droppable_indexes.at(rand_int(droppable_indexes.size() - 1));
     auto name = index->name_;
     std::string sql = "DROP INDEX IF EXISTS " + name;
     table_mutex.unlock();
@@ -2784,8 +2978,11 @@ void Table::UpdateRandomROW(Thd1 *thd) {
     sql = "UPDATE " + pg_partition_target(this);
 
   auto set_value =
-      columns_->at(set)->name_.find("fk_col") != std::string::npos
+      type == TABLE_TYPES::FK &&
+              static_cast<FK_table *>(this)->child_key == columns_->at(set)
           ? fk_reference_value_expr(this)
+          : columns_->at(set)->referenced_key
+                ? random_unique_value_expr(columns_->at(set))
           : columns_->at(set)->rand_value();
   sql += " SET " + columns_->at(set)->name_ + " = " + set_value + " WHERE ";
 
@@ -2838,12 +3035,6 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
 
   std::string prepare_sql = "INSERT ";
 
-  std::vector<int> fk_unique_keys;
-
-  /* If a table has FK move its parent keys in fk_unique_keys */
-  if (type == TABLE_TYPES::FK) {
-    fk_unique_keys = std::move(thd->unique_keys);
-  }
   if (has_pk()) {
     thd->unique_keys = generateUniqueRandomNumbers(number_of_initial_records);
   }
@@ -2873,14 +3064,15 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   while (records < number_of_initial_records) {
     std::string value = "(";
     for (const auto &column : *columns_) {
-      /* For FK we get the unique value from the parent table unique vector */
-      if (column->name_.find("fk_col") != std::string::npos) {
-        value +=
-            std::to_string(fk_unique_keys[rand_int(fk_unique_keys.size() - 1)]);
+      if (type == TABLE_TYPES::FK &&
+          static_cast<FK_table *>(this)->child_key == column) {
+        value += fk_reference_value_expr(this);
       } else if (column->type_ == Column::COLUMN_TYPES::GENERATED) {
         value += "DEFAULT";
       } else if (column->primary_key) {
         value += std::to_string(thd->unique_keys.at(records));
+      } else if (column->referenced_key) {
+        value += deterministic_unique_value(column, records);
       } else if (column->auto_increment == true) {
         value += "DEFAULT";
       } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
@@ -2926,10 +3118,13 @@ void Table::InsertRandomRow(Thd1 *thd) {
     sql += column->name_ + " ,";
     column_names.push_back(column->name_);
     std::string val;
-    if (column->name_.find("fk_col") != std::string::npos)
+    if (type == TABLE_TYPES::FK &&
+        static_cast<FK_table *>(this)->child_key == column)
       val = fk_reference_value_expr(this);
     else if (column->type_ == Column::COLUMN_TYPES::GENERATED)
       val = "default";
+    else if (column->referenced_key)
+      val = random_unique_value_expr(column);
     else
       val = column->rand_value();
     if (column->auto_increment == true && rand_int(100) < 10)
@@ -3281,12 +3476,14 @@ static std::string load_metadata_from_file() {
       a->auto_increment = col["auto_increment"].GetBool();
       a->length = metadata_int_member(col, "length", "lenght");
       a->primary_key = col["primary_key"].GetBool();
+      a->referenced_key = metadata_bool_member(col, "referenced_key");
       a->compressed = col["compressed"].GetBool();
       table->AddInternalColumn(a);
     }
 
     for (auto &ind : tab["indexes"].GetArray()) {
       Index *index = new Index(ind["name"].GetString());
+      index->unique = metadata_bool_member(ind, "unique");
 
       for (auto &ind_col : ind["index_columns"].GetArray()) {
         std::string index_base_column = ind_col["name"].GetString();
@@ -3300,6 +3497,13 @@ static std::string load_metadata_from_file() {
         }
       }
       table->AddInternalIndex(index);
+    }
+
+    if (table->type == Table::FK) {
+      auto *fk_table = static_cast<FK_table *>(table);
+      fk_table->parent_key_name = metadata_string_member(tab, "parent_key", nullptr);
+      fk_table->child_key_name = metadata_string_member(tab, "child_key", nullptr);
+      fk_table->resolve_reference_columns();
     }
 
     all_tables->push_back(table);
@@ -3401,9 +3605,8 @@ bool Thd1::run_some_query() {
     auto current = table_started++;
 
     while (current <= options->at(Option::TABLES)->getInt()) {
-      /* first load normal table , then FK and then partition
-       FK table uses thd->unique_key vector to pick random FK
-       thd->unique_key is populated from primary key */
+      /* Load normal tables before FK tables so FK values can select from the
+       * parent reference column during initial child-table load. */
 
       for (const auto &tableType : tableTypes) {
         auto table = pick_table(tableType, current + 1);
