@@ -444,3 +444,55 @@
   the cached-value mixed strategy materially improved non-empty result /
   affected-row probability for `SELECT`, `UPDATE`, and `DELETE` without
   introducing a visible stability regression in the 3-minute validation run.
+
+## 2026-04-24 - Iteration 11: generated-column budgeting and fallback
+
+### Scope
+
+- Reworked generated-column creation from width-scaled probabilistic growth to
+  an explicit budgeted policy.
+- Added a per-table generated-column cap using an adaptive budget:
+  approximately `total_columns / 40`, with a hard cap of `8`.
+- Removed the old “last 20% of columns with 50% chance” behavior during
+  initial table creation and replaced it with distributed placement governed by
+  the remaining per-table budget.
+- Added a per-generated-column dependency budget:
+  - normal target up to `4` source columns
+  - occasional expansion up to a hard cap of `8`
+- Changed source-column selection to deduplicate dependencies by shuffling the
+  eligible source pool and slicing a bounded prefix, rather than repeatedly
+  sampling with replacement.
+- Tightened generated-column source eligibility to avoid expensive source
+  families by default:
+  `BIT`, `VARBIT`, `BYTEA`, `BLOB`, `JSON`, and `JSONB` are no longer used as
+  generated-column source columns.
+- Added a text-expression output budget for generated text columns:
+  total projected output width is now bounded to `32..128`.
+- Added fallback behavior for generated-column creation:
+  if a generated column cannot be built within policy after bounded retries,
+  the tool falls back to a plain scalar/text column instead of failing table
+  creation.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted wide-table smoke:
+  `--tables=2 --threads=1 --seconds=30 --columns=300`
+- Wide-table smoke result: completed with exit code `0`
+- Wide-table smoke summary: `0/86555` failed, `100.00%` successful
+- Smoke found no `Thread N failed`, `syntax error`, or `FATAL` failures during
+  `CREATE TABLE` on the generated-column-heavy wide-table path.
+- 3-minute wide-table local run against `127.0.0.1:5432`
+- Command shape:
+  `--tables=3 --threads=2 --seconds=180 --columns=300`
+- Result: completed with exit code `0`
+- Summary: `91/522524` queries failed, `99.98%` successful
+- Remaining failures were expected random-concurrency classes:
+  FK conflicts (`23503`), duplicate unique/primary values (`23505`), and
+  deadlocks (`40P01`).
+- Observed generated-column count in `CREATE TABLE` statements for this 300-column
+  validation sample:
+  `1`, `1`, `4`, `6`; maximum observed generated-column count in one table was
+  `6`, which is below the new hard cap of `8`.
+- No table-creation regression attributable to generated-column explosion was
+  observed in the 300-column validation run.

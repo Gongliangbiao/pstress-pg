@@ -27,6 +27,12 @@ todo allow this option to be configured by user */
 const int g_integer_range = 100;
 const int k_hit_cache_limit = 64;
 const int k_hit_where_probability = 70;
+const size_t k_generated_columns_hard_cap = 8;
+const size_t k_generated_min_base_columns = 4;
+const size_t k_generated_dependency_soft_cap = 4;
+const size_t k_generated_dependency_hard_cap = 8;
+const int k_generated_text_budget_min = 32;
+const int k_generated_text_budget_max = 128;
 
 static std::vector<Table *> *all_tables = new std::vector<Table *>;
 static std::vector<std::string> locks;
@@ -349,6 +355,12 @@ static int pg_index_total_width(const Index *index) {
 static bool pg_generated_source_column(const Column *column) {
   switch (column->type_) {
   case Column::GENERATED:
+  case Column::BIT:
+  case Column::VARBIT:
+  case Column::BYTEA:
+  case Column::BLOB:
+  case Column::JSON:
+  case Column::JSONB:
   case Column::TIMETZ:
   case Column::TIMESTAMPTZ:
   case Column::MONEY:
@@ -380,6 +392,70 @@ static bool pg_generated_source_column(const Column *column) {
   default:
     return !column->auto_increment;
   }
+}
+
+static size_t count_generated_columns(const Table *table) {
+  size_t count = 0;
+  for (const auto *column : *table->columns_) {
+    if (column->type_ == Column::GENERATED) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+static std::vector<size_t> generated_source_positions(const Table *table) {
+  std::vector<size_t> positions;
+  for (size_t i = 0; i < table->columns_->size(); ++i) {
+    if (pg_generated_source_column(table->columns_->at(i))) {
+      positions.push_back(i);
+    }
+  }
+  return positions;
+}
+
+static size_t generated_column_budget(size_t total_columns) {
+  if (total_columns < k_generated_min_base_columns + 2) {
+    return 0;
+  }
+  return std::min(k_generated_columns_hard_cap,
+                  std::max<size_t>(1, total_columns / 40));
+}
+
+static bool generated_column_allowed(const Table *table, size_t total_columns_budget) {
+  return count_generated_columns(table) < generated_column_budget(total_columns_budget) &&
+         generated_source_positions(table).size() >= k_generated_min_base_columns;
+}
+
+static Column::COLUMN_TYPES fallback_generated_column_type() {
+  std::vector<Column::COLUMN_TYPES> types = {
+      Column::INT, Column::BIGINT, Column::NUMERIC, Column::VARCHAR, Column::CHAR};
+  if (!options->at(Option::NO_BLOB)->getBool()) {
+    types.push_back(Column::BLOB);
+  }
+  return types.at(rand_int(types.size() - 1));
+}
+
+static Column *make_generated_or_fallback_column(const std::string &name, Table *table,
+                                                 size_t total_columns_budget,
+                                                 bool &created_generated) {
+  created_generated = false;
+  if (generated_column_allowed(table, total_columns_budget)) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+      try {
+        auto *generated = new Generated_Column(name, table);
+        created_generated = true;
+        return generated;
+      } catch (const std::exception &) {
+      }
+    }
+  }
+
+  auto fallback_type = fallback_generated_column_type();
+  if (fallback_type == Column::BLOB) {
+    return new Blob_Column(name, table);
+  }
+  return new Column(name, table, fallback_type);
 }
 
 /* return table pointer of matching table. This is only done during the
@@ -2040,25 +2116,24 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     }
   }
 
-  /*number of columns in generated columns */
-  size_t columns = rand_int(.6 * table->columns_->size()) + 1;
-
-  std::vector<size_t> col_pos; // position of columns
-  size_t attempts = 0;
-  while (col_pos.size() < columns && attempts++ < table->columns_->size() * 16) {
-    size_t col = rand_int(table->columns_->size() - 1);
-    if (pg_generated_source_column(table->columns_->at(col)))
-      col_pos.push_back(col);
+  auto col_pos = generated_source_positions(table);
+  if (col_pos.size() < k_generated_min_base_columns) {
+    throw std::runtime_error("insufficient generated column sources");
   }
 
-  if (col_pos.empty()) {
-    for (size_t i = 0; i < table->columns_->size(); ++i) {
-      if (pg_generated_source_column(table->columns_->at(i))) {
-        col_pos.push_back(i);
-        break;
-      }
-    }
+  std::shuffle(col_pos.begin(), col_pos.end(), rng);
+
+  size_t dependency_cap =
+      std::min(k_generated_dependency_soft_cap, col_pos.size());
+  if (col_pos.size() > k_generated_dependency_soft_cap && rand_int(3) == 0) {
+    dependency_cap = std::min(k_generated_dependency_hard_cap, col_pos.size());
   }
+
+  if (dependency_cap == 0) {
+    throw std::runtime_error("zero generated dependency budget");
+  }
+
+  col_pos.resize(rand_int(static_cast<int>(dependency_cap), 1));
 
   if (g_type == INT || g_type == INTEGER || g_type == BIGINT ||
       g_type == SMALLINT || g_type == NUMERIC) {
@@ -2086,17 +2161,22 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     str += ") STORED";
     return;
   } else if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
-    int min_size = std::min(static_cast<int>(col_pos.size()), g_max_columns_length);
-    int max_size = std::max(g_max_columns_length, min_size);
-    auto size = rand_int(max_size, std::max(1, min_size));
+    auto size = rand_int(k_generated_text_budget_max, k_generated_text_budget_min);
     int actual_size = 0;
     std::vector<std::string> parts;
-    for (auto pos : col_pos) {
-      int current_upper =
-          std::max(1, static_cast<int>(size) / static_cast<int>(col_pos.size()) * 2);
+    int remaining_budget = size;
+    for (size_t i = 0; i < col_pos.size() && remaining_budget > 0; ++i) {
+      auto pos = col_pos[i];
+      int remaining_sources = static_cast<int>(col_pos.size() - i);
+      int current_upper = std::max(1, remaining_budget / remaining_sources);
       auto current_size = rand_int(current_upper, 1);
       parts.push_back(pg_generated_text_term(table->columns_->at(pos),
                                              current_size, actual_size));
+      remaining_budget = std::max(0, size - actual_size);
+    }
+
+    if (parts.empty() || actual_size == 0) {
+      throw std::runtime_error("empty generated text expression");
     }
 
     str = " " + col_type_to_string(g_type);
@@ -3191,6 +3271,7 @@ void Table::CreateDefaultColumn() {
   static auto max_col = opt_int(COLUMNS);
 
   auto max_columns = rand_int(max_col, 1);
+  auto generated_budget = generated_column_budget(max_columns);
 
   for (int i = 0; i < max_columns; i++) {
     std::string name;
@@ -3218,15 +3299,24 @@ void Table::CreateDefaultColumn() {
       Column::COLUMN_TYPES col_type = Column::COLUMN_MAX;
       static auto no_virtual_col = opt_bool(NO_VIRTUAL_COLUMNS);
       static auto no_blob_col = opt_bool(NO_BLOB);
+      bool want_generated = false;
+
+      if (!no_virtual_col && generated_column_allowed(this, max_columns)) {
+        size_t remaining_slots = static_cast<size_t>(max_columns - i);
+        size_t remaining_generated = generated_budget - count_generated_columns(this);
+        if (remaining_generated > 0 && remaining_slots > 0 &&
+            rand_int(static_cast<int>(remaining_slots - 1)) <
+                static_cast<int>(remaining_generated)) {
+          want_generated = true;
+        }
+      }
 
       /* loop untill we select some column */
       while (col_type == Column::COLUMN_MAX) {
 
         auto prob = rand_int(89);
 
-        /* intial columns can't be generated columns. also 50% of tables last
-         * columns are virtuals */
-        if (!no_virtual_col && i >= .8 * max_columns && rand_int(1) == 1)
+        if (want_generated)
           col_type = Column::GENERATED;
         else if (prob < 3)
           col_type = Column::SMALLINT;
@@ -3330,9 +3420,11 @@ void Table::CreateDefaultColumn() {
           col_type = Column::UUID;
       }
 
-      if (col_type == Column::GENERATED)
-        col = new Generated_Column(name, this);
-      else if (col_type == Column::BLOB)
+      if (col_type == Column::GENERATED) {
+        bool created_generated = false;
+        col = make_generated_or_fallback_column(name, this, max_columns,
+                                                created_generated);
+      } else if (col_type == Column::BLOB)
         col = new Blob_Column(name, this);
       else
         col = new Column(name, this, col_type);
@@ -3949,12 +4041,14 @@ void Table::AddColumn(Thd1 *thd) {
   Column::COLUMN_TYPES col_type = Column::COLUMN_MAX;
 
   auto use_virtual = true;
+  size_t total_columns_budget = columns_->size() + 1;
 
   // lock table to create definition
   table_mutex.lock();
 
   if (no_use_virtual ||
-      (columns_->size() == 1 && columns_->at(0)->auto_increment == true))
+      (columns_->size() == 1 && columns_->at(0)->auto_increment == true) ||
+      !generated_column_allowed(this, total_columns_budget))
     use_virtual = false;
 
   while (col_type == Column::COLUMN_MAX) {
@@ -4053,9 +4147,11 @@ void Table::AddColumn(Thd1 *thd) {
     std::string name =
         "N" + std::to_string(rand_int(100000, 1000)) + "_" + std::to_string(attempt);
 
-    if (col_type == Column::GENERATED)
-      tc = new Generated_Column(name, this);
-    else if (col_type == Column::BLOB)
+    if (col_type == Column::GENERATED) {
+      bool created_generated = false;
+      tc = make_generated_or_fallback_column(name, this, total_columns_budget,
+                                             created_generated);
+    } else if (col_type == Column::BLOB)
       tc = new Blob_Column(name, this);
     else
       tc = new Column(name, this, col_type);
