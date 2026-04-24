@@ -25,6 +25,8 @@ const int version = 2;
  successful DML.
 todo allow this option to be configured by user */
 const int g_integer_range = 100;
+const int k_hit_cache_limit = 64;
+const int k_hit_where_probability = 70;
 
 static std::vector<Table *> *all_tables = new std::vector<Table *>;
 static std::vector<std::string> locks;
@@ -1099,6 +1101,7 @@ static std::string deterministic_unique_value(const Column *column, int offset) 
   case Column::XML:
   case Column::TSVECTOR:
   case Column::TSQUERY:
+  case Column::GENERATED:
   case Column::POINT:
   case Column::LINE:
   case Column::LSEG:
@@ -1119,7 +1122,6 @@ static std::string deterministic_unique_value(const Column *column, int offset) 
   case Column::TSTZRANGE:
   case Column::DATERANGE:
   case Column::INTERVAL:
-  case Column::GENERATED:
   case Column::COLUMN_MAX:
     break;
   }
@@ -1184,6 +1186,7 @@ static std::string random_unique_value_expr(const Column *column) {
   case Column::XML:
   case Column::TSVECTOR:
   case Column::TSQUERY:
+  case Column::GENERATED:
   case Column::POINT:
   case Column::LINE:
   case Column::LSEG:
@@ -1204,7 +1207,6 @@ static std::string random_unique_value_expr(const Column *column) {
   case Column::TSTZRANGE:
   case Column::DATERANGE:
   case Column::INTERVAL:
-  case Column::GENERATED:
   case Column::COLUMN_MAX:
     break;
   }
@@ -2443,6 +2445,215 @@ static std::string fk_reference_value_expr(const Table *table) {
          fk_table->parent->name_ + " ORDER BY random() LIMIT 1)";
 }
 
+static bool simple_scalar_hit_column(const Column *column) {
+  if (column == nullptr || column->type_ == Column::GENERATED) {
+    return false;
+  }
+
+  switch (column->type_) {
+  case Column::BOOL:
+  case Column::SMALLINT:
+  case Column::INTEGER:
+  case Column::INT:
+  case Column::BIGINT:
+  case Column::NUMERIC:
+  case Column::FLOAT:
+  case Column::DOUBLE:
+  case Column::DATE:
+  case Column::TIME:
+  case Column::TIMETZ:
+  case Column::TIMESTAMP:
+  case Column::TIMESTAMPTZ:
+  case Column::INTERVAL:
+  case Column::VARCHAR:
+  case Column::CHAR:
+  case Column::UUID:
+  case Column::INET:
+  case Column::CIDR:
+  case Column::MACADDR:
+  case Column::MACADDR8:
+  case Column::MONEY:
+    return true;
+  case Column::BIT:
+  case Column::VARBIT:
+  case Column::BYTEA:
+  case Column::BLOB:
+  case Column::JSON:
+  case Column::JSONB:
+  case Column::XML:
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+  case Column::GENERATED:
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
+  case Column::COLUMN_MAX:
+    return false;
+  }
+
+  return false;
+}
+
+static bool cacheable_sql_value(const std::string &expr) {
+  if (expr.empty()) {
+    return false;
+  }
+
+  std::string lowered = expr;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+  if (lowered == "default" || lowered == "null") {
+    return false;
+  }
+
+  return lowered.find("select ") == std::string::npos &&
+         lowered.find("(select ") == std::string::npos;
+}
+
+static bool has_cached_hit_value(Table *table, const Column *column) {
+  if (table == nullptr || column == nullptr) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> guard(table->hit_value_mutex);
+  auto it = table->hit_value_cache.find(column->name_);
+  return it != table->hit_value_cache.end() && !it->second.empty();
+}
+
+static void remember_hit_value(Table *table, const Column *column,
+                               const std::string &value_expr) {
+  if (table == nullptr || !simple_scalar_hit_column(column) ||
+      !cacheable_sql_value(value_expr)) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> guard(table->hit_value_mutex);
+  auto &bucket = table->hit_value_cache[column->name_];
+  bucket.push_back(value_expr);
+  if (bucket.size() > k_hit_cache_limit) {
+    bucket.pop_front();
+  }
+}
+
+static std::string cached_hit_value(Table *table, const Column *column) {
+  if (table == nullptr || column == nullptr) {
+    return "";
+  }
+
+  std::lock_guard<std::mutex> guard(table->hit_value_mutex);
+  auto it = table->hit_value_cache.find(column->name_);
+  if (it == table->hit_value_cache.end() || it->second.empty()) {
+    return "";
+  }
+  return it->second.at(rand_int(it->second.size() - 1));
+}
+
+static void clear_hit_value_cache(Table *table) {
+  if (table == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(table->hit_value_mutex);
+  table->hit_value_cache.clear();
+}
+
+static void rename_hit_value_cache(Table *table, const std::string &from,
+                                   const std::string &to) {
+  if (table == nullptr || from == to) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> guard(table->hit_value_mutex);
+  auto it = table->hit_value_cache.find(from);
+  if (it == table->hit_value_cache.end()) {
+    return;
+  }
+  table->hit_value_cache[to] = std::move(it->second);
+  table->hit_value_cache.erase(it);
+}
+
+static void erase_hit_value_cache(Table *table, const std::string &name) {
+  if (table == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(table->hit_value_mutex);
+  table->hit_value_cache.erase(name);
+}
+
+static bool use_hit_oriented_where() {
+  return rand_int(99) < k_hit_where_probability;
+}
+
+static Column *pick_hit_where_column(Table *table) {
+  if (table == nullptr) {
+    return nullptr;
+  }
+
+  std::vector<Column *> primary_columns;
+  std::vector<Column *> key_columns;
+  std::vector<Column *> scalar_columns;
+
+  for (auto *column : *table->columns_) {
+    if (!simple_scalar_hit_column(column) || !has_cached_hit_value(table, column)) {
+      continue;
+    }
+
+    if (column->primary_key) {
+      primary_columns.push_back(column);
+    } else if (column->referenced_key) {
+      key_columns.push_back(column);
+    } else {
+      scalar_columns.push_back(column);
+    }
+  }
+
+  if (!primary_columns.empty()) {
+    return primary_columns.at(rand_int(primary_columns.size() - 1));
+  }
+  if (!key_columns.empty()) {
+    return key_columns.at(rand_int(key_columns.size() - 1));
+  }
+  if (!scalar_columns.empty()) {
+    return scalar_columns.at(rand_int(scalar_columns.size() - 1));
+  }
+  return nullptr;
+}
+
+static bool build_hit_oriented_where(Table *table, std::string &predicate) {
+  if (!use_hit_oriented_where()) {
+    return false;
+  }
+
+  auto *column = pick_hit_where_column(table);
+  if (column == nullptr) {
+    return false;
+  }
+
+  auto value_expr = cached_hit_value(table, column);
+  if (value_expr.empty()) {
+    return false;
+  }
+
+  predicate = column->name_ + " = " + value_expr;
+  return true;
+}
+
 /* index definition */
 std::string Index::definition() {
   return "INDEX " + name_ + "(" + index_column_list(this) + ") ";
@@ -2707,7 +2918,9 @@ Partition::Partition(std::string n) : Table(n) {
 
 void Table::DropCreate(Thd1 *thd) {
   execute_sql("DROP TABLE " + name_, thd);
-  execute_sql(definition(), thd);
+  if (execute_sql(definition(), thd)) {
+    clear_hit_value_cache(this);
+  }
 }
 
 void Table::Optimize(Thd1 *thd) {
@@ -2730,8 +2943,11 @@ void Table::Truncate(Thd1 *thd) {
   if (referenced_by_fk(this)) {
     return;
   }
-  execute_sql("TRUNCATE TABLE " + (type == PARTITION ? pg_partition_target(this) : name_),
-              thd);
+  if (execute_sql("TRUNCATE TABLE " +
+                      (type == PARTITION ? pg_partition_target(this) : name_),
+                  thd)) {
+    clear_hit_value_cache(this);
+  }
 }
 
 /* add or drop average 10% of max partitions */
@@ -3679,6 +3895,7 @@ void Table::DropColumn(Thd1 *thd) {
 
   if (execute_sql(sql, thd)) {
     table_mutex.lock();
+    erase_hit_value_cache(this, name);
 
     std::vector<int> indexes_to_drop;
     for (auto id = indexes_->begin(); id != indexes_->end(); id++) {
@@ -4002,10 +4219,14 @@ void Table::AddIndex(Thd1 *thd) {
 void Table::DeleteAllRows(Thd1 *thd) {
   std::string sql = "DELETE FROM " + name_;
   if (type == PARTITION && rand_int(100) < 98) {
-    execute_sql("DELETE FROM " + pg_partition_target(this), thd);
+    if (execute_sql("DELETE FROM " + pg_partition_target(this), thd)) {
+      clear_hit_value_cache(this);
+    }
     return;
   }
-  execute_sql(sql, thd);
+  if (execute_sql(sql, thd)) {
+    clear_hit_value_cache(this);
+  }
 }
 
 void Table::SelectAllRow(Thd1 *thd) {
@@ -4070,6 +4291,7 @@ void Table::ColumnRename(Thd1 *thd) {
         col->name_ = new_name;
     }
     table_mutex.unlock();
+    rename_hit_value_cache(this, name, new_name);
   }
 }
 
@@ -4168,25 +4390,29 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 
   if (type == PARTITION && rand_int(10) < 2)
     sql = "DELETE FROM " + pg_partition_target(this);
-  sql += " WHERE " + columns_->at(where)->name_;
-
-  auto prob = rand_int(100);
-  if (prob <= 90)
-    sql += " = " + columns_->at(where)->rand_value();
-  else if (prob <= 92)
-    sql += " >= " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->name_ +
-           " <= " + columns_->at(where)->rand_value();
-  else if (prob <= 96)
-    sql += " IN (" + columns_->at(where)->rand_value() + "," +
-           columns_->at(where)->rand_value() + ")";
-  else if (prob <= 99)
-    sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->rand_value();
-  else if (supports_like_predicate(columns_->at(where)))
-    sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
-  else
-    sql += " = " + columns_->at(where)->rand_value();
+  std::string predicate;
+  if (!build_hit_oriented_where(this, predicate)) {
+    predicate = columns_->at(where)->name_;
+    auto prob = rand_int(100);
+    if (prob <= 90)
+      predicate += " = " + columns_->at(where)->rand_value();
+    else if (prob <= 92)
+      predicate += " >= " + columns_->at(where)->rand_value() + " AND " +
+                   columns_->at(where)->name_ +
+                   " <= " + columns_->at(where)->rand_value();
+    else if (prob <= 96)
+      predicate += " IN (" + columns_->at(where)->rand_value() + "," +
+                   columns_->at(where)->rand_value() + ")";
+    else if (prob <= 99)
+      predicate += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
+                   columns_->at(where)->rand_value();
+    else if (supports_like_predicate(columns_->at(where)))
+      predicate += " LIKE " +
+                   prepare_like_string(columns_->at(where)->rand_value());
+    else
+      predicate += " = " + columns_->at(where)->rand_value();
+  }
+  sql += " WHERE " + predicate;
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -4272,27 +4498,32 @@ void Table::SelectRandomRow(Thd1 *thd) {
   if (type == PARTITION && rand_int(10) < 2)
     sql = "SELECT * FROM " + pg_partition_target(this);
 
-  sql += " WHERE " + columns_->at(where)->name_;
-  auto prob = rand_int(100);
-  if (rand_int(1000) < 2)
-    sql += " NOT BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->rand_value();
-  else if (prob <= 90)
-    sql += " = " + columns_->at(where)->rand_value();
-  else if (prob <= 92)
-    sql += " >= " + columns_->at(where)->rand_value();
-  else if (prob <= 94)
-    sql += " >= " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->name_ +
-           " <= " + columns_->at(where)->rand_value();
-  else if (prob <= 96)
-    sql += " IN (" + columns_->at(where)->rand_value() + ", " +
-           columns_->at(where)->rand_value() + ")";
-  else if (prob <= 98 && supports_like_predicate(columns_->at(where)))
-    sql += " LIKE " + prepare_like_string(columns_->at(where)->rand_value());
-  else
-    sql += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->rand_value();
+  std::string predicate;
+  if (!build_hit_oriented_where(this, predicate)) {
+    predicate = columns_->at(where)->name_;
+    auto prob = rand_int(100);
+    if (rand_int(1000) < 2)
+      predicate += " NOT BETWEEN " + columns_->at(where)->rand_value() + " AND " +
+                   columns_->at(where)->rand_value();
+    else if (prob <= 90)
+      predicate += " = " + columns_->at(where)->rand_value();
+    else if (prob <= 92)
+      predicate += " >= " + columns_->at(where)->rand_value();
+    else if (prob <= 94)
+      predicate += " >= " + columns_->at(where)->rand_value() + " AND " +
+                   columns_->at(where)->name_ +
+                   " <= " + columns_->at(where)->rand_value();
+    else if (prob <= 96)
+      predicate += " IN (" + columns_->at(where)->rand_value() + ", " +
+                   columns_->at(where)->rand_value() + ")";
+    else if (prob <= 98 && supports_like_predicate(columns_->at(where)))
+      predicate += " LIKE " +
+                   prepare_like_string(columns_->at(where)->rand_value());
+    else
+      predicate += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
+                   columns_->at(where)->rand_value();
+  }
+  sql += " WHERE " + predicate;
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -4401,29 +4632,33 @@ void Table::UpdateRandomROW(Thd1 *thd) {
       break;
     }
   }
-  auto prob = rand_int(100);
-  if (prob <= 90)
-    sql +=
-        columns_->at(where)->name_ + " = " + columns_->at(where)->rand_value();
-  else if (prob <= 92)
-    sql += columns_->at(where)->name_ +
-           " >= " + columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->name_ +
-           " >= " + columns_->at(where)->rand_value();
-  else if (prob <= 94)
-    sql += columns_->at(where)->name_ + " IN (" +
-           columns_->at(where)->rand_value() + "," +
-           columns_->at(where)->rand_value() + ")";
-  else if (prob <= 98)
-    sql += columns_->at(where)->name_ + " BETWEEN " +
-           columns_->at(where)->rand_value() + " AND " +
-           columns_->at(where)->rand_value();
-  else if (supports_like_predicate(columns_->at(where)))
-    sql += columns_->at(where)->name_ + " LIKE " +
-           prepare_like_string(columns_->at(where)->rand_value());
-  else
-    sql += columns_->at(where)->name_ + " = " +
-           columns_->at(where)->rand_value();
+  std::string predicate;
+  if (!build_hit_oriented_where(this, predicate)) {
+    auto prob = rand_int(100);
+    if (prob <= 90)
+      predicate =
+          columns_->at(where)->name_ + " = " + columns_->at(where)->rand_value();
+    else if (prob <= 92)
+      predicate = columns_->at(where)->name_ +
+                  " >= " + columns_->at(where)->rand_value() + " AND " +
+                  columns_->at(where)->name_ +
+                  " >= " + columns_->at(where)->rand_value();
+    else if (prob <= 94)
+      predicate = columns_->at(where)->name_ + " IN (" +
+                  columns_->at(where)->rand_value() + "," +
+                  columns_->at(where)->rand_value() + ")";
+    else if (prob <= 98)
+      predicate = columns_->at(where)->name_ + " BETWEEN " +
+                  columns_->at(where)->rand_value() + " AND " +
+                  columns_->at(where)->rand_value();
+    else if (supports_like_predicate(columns_->at(where)))
+      predicate = columns_->at(where)->name_ + " LIKE " +
+                  prepare_like_string(columns_->at(where)->rand_value());
+    else
+      predicate = columns_->at(where)->name_ + " = " +
+                  columns_->at(where)->rand_value();
+  }
+  sql += predicate;
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -4467,37 +4702,43 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   prepare_sql += ")";
 
   std::string values = " VALUES";
+  std::vector<std::vector<std::pair<Column *, std::string>>> batch_cache_entries;
   int records = 0;
 
   while (records < number_of_initial_records) {
     std::string value = "(";
+    std::vector<std::pair<Column *, std::string>> row_cache_entries;
     for (const auto &column : *columns_) {
+      std::string value_expr;
       if (type == TABLE_TYPES::FK &&
           static_cast<FK_table *>(this)->child_key == column) {
-        value += fk_reference_value_expr(this);
+        value_expr = fk_reference_value_expr(this);
       } else if (column->type_ == Column::COLUMN_TYPES::GENERATED) {
-        value += "DEFAULT";
+        value_expr = "DEFAULT";
       } else if (column->primary_key) {
-        value += std::to_string(thd->unique_keys.at(records));
+        value_expr = std::to_string(thd->unique_keys.at(records));
       } else if (column->referenced_key) {
-        value += deterministic_unique_value(column, records);
+        value_expr = deterministic_unique_value(column, records);
       } else if (column->auto_increment == true) {
-        value += "DEFAULT";
+        value_expr = "DEFAULT";
       } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
         /* for list partition we insert only maximum possible value
          * todo modify rand_value to return list parititon range */
-        value += std::to_string(
+        value_expr = std::to_string(
             rand_int(maximum_records_in_each_parititon_list *
                      options->at(Option::MAX_PARTITIONS)->getInt()));
       } else {
-        value += column->rand_value();
+        value_expr = column->rand_value();
       }
 
+      value += value_expr;
       value += ", ";
+      row_cache_entries.push_back({column, value_expr});
     }
     value.erase(value.size() - 2);
     value += ")";
     values += value;
+    batch_cache_entries.push_back(std::move(row_cache_entries));
     records++;
     if (values.size() > 1024 * 1024 || number_of_initial_records == records) {
       if (!execute_sql(prepare_sql + values, thd)) {
@@ -4507,6 +4748,12 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
         run_query_failed = true;
         return false;
       }
+      for (const auto &row_entries : batch_cache_entries) {
+        for (const auto &entry : row_entries) {
+          remember_hit_value(this, entry.first, entry.second);
+        }
+      }
+      batch_cache_entries.clear();
       values = " VALUES";
     } else {
       values += ", ";
@@ -4521,10 +4768,12 @@ void Table::InsertRandomRow(Thd1 *thd) {
   std::string vals = "";
   std::string sql = "INSERT INTO " + name_ + "  ( ";
   std::vector<std::string> column_names;
+  std::vector<Column *> value_columns;
   std::vector<std::string> value_exprs;
   for (auto &column : *columns_) {
     sql += column->name_ + " ,";
     column_names.push_back(column->name_);
+    value_columns.push_back(column);
     std::string val;
     if (type == TABLE_TYPES::FK &&
         static_cast<FK_table *>(this)->child_key == column)
@@ -4582,7 +4831,11 @@ void Table::InsertRandomRow(Thd1 *thd) {
   }
 
   table_mutex.unlock();
-  execute_sql(sql, thd);
+  if (execute_sql(sql, thd)) {
+    for (size_t i = 0; i < value_columns.size(); ++i) {
+      remember_hit_value(this, value_columns[i], value_exprs[i]);
+    }
+  }
 }
 
 /* load special sql from a file */

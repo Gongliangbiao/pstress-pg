@@ -371,3 +371,76 @@
 - Remaining failures: duplicate unique/primary values (`23505`), FK conflicts
   (`23503`), transaction-abort follow-up errors (`25P02`), and deadlocks
   (`40P01`).
+
+## 2026-04-23 - Iteration 10: improve DML hit rate with cached real values
+
+### Scope
+
+- Implemented the first PostgreSQL-only version of the recommended
+  `Option 1 + Option 5` plan from
+  `dml_hit_rate_improvement_options.md`.
+- Added a per-table bounded real-value cache keyed by column name, used to
+  retain recently inserted scalar values that are safe to reuse in `WHERE`
+  predicates.
+- Seeded the cache from successful bulk-load inserts and successful random
+  inserts, so the hit-oriented path has real values available immediately
+  after initial table load.
+- Switched `DELETE ... WHERE`, `SELECT ... WHERE`, and `UPDATE ... WHERE`
+  to a mixed strategy:
+  - `70%` hit-oriented predicates using cached real values
+  - `30%` original random predicates as fallback
+- Kept the first iteration conservative by limiting hit-oriented predicates to
+  simple scalar PostgreSQL column types and prioritizing columns in this
+  order:
+  `PK` -> `referenced unique/FK-supporting key` -> other scalar columns.
+- Added cache lifecycle handling for `DROP/CREATE`, `TRUNCATE`,
+  `DELETE ALL ROWS`, column rename, and column drop so stale values do not
+  keep accumulating across destructive table changes.
+- Explicitly skipped unsafe cache sources such as `DEFAULT`, `NULL`, and
+  subquery-based expressions like FK `(SELECT ... LIMIT 1)` value generation.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Targeted smoke: `--tables=3 --threads=2 --seconds=30`
+- Smoke result: completed with exit code `0`
+- Smoke summary: `34/436753` queries failed, `99.99%` successful
+- Smoke found no thread failures and no new structural errors such as
+  `syntax error`, `FATAL`, `42P10`, `42704`, `42883`, or `22P*`.
+- 3-minute local run against `127.0.0.1:5432`
+- Command shape: `--tables=3 --threads=2 --seconds=180`
+- Result: completed with exit code `0`
+- Summary: `83/998776` queries failed, `99.99%` successful
+- Remaining failures in this sample were only expected concurrent-random
+  classes: duplicate unique/primary values (`23505`), transaction-abort
+  follow-up errors (`25P02`), and deadlocks (`40P01`).
+- No `Thread N failed`, `syntax error`, `FATAL`, or other new structural
+  regressions were observed in the 3-minute run.
+
+### Hit-rate comparison
+
+- Added a same-shape before/after comparison using successful SQL log lines in
+  the form `S <sql> rows:<n>`.
+- Comparison method:
+  - baseline: pre-hit-rate-change code at revision `3f9b07b`
+  - candidate: current working tree with cached real-value `WHERE` logic
+  - shared command shape:
+    `--address=127.0.0.1 --port=5432 --user=gongliangbiao --database=postgres --tables=3 --threads=2 --seconds=180 --log-all-queries --log-failed-queries`
+  - hit definition: `rows > 0`
+- Baseline summary: `109/1025930` failed, `99.99%` successful
+- Candidate summary: `83/998776` failed, `99.99%` successful
+- Measured hit-rate change:
+  - `SELECT`: `11.80%` -> `56.40%` (`+44.60` percentage points, `4.78x`)
+  - `UPDATE`: `7.15%` -> `54.56%` (`+47.41` percentage points, `7.63x`)
+  - `DELETE`: `6.29%` -> `54.48%` (`+48.19` percentage points, `8.66x`)
+- Additional observations:
+  - successful `SELECT` count changed from `459107` to `447591` (`-2.51%`)
+  - successful `UPDATE` count changed from `111856` to `108353` (`-3.13%`)
+  - successful `DELETE` count changed from `112499` to `108705` (`-3.37%`)
+  - average rows per successful `SELECT` changed from `5.74` to `4.03`
+  - average rows per successful `UPDATE` changed from `2.26` to `2.07`
+  - average rows per successful `DELETE` changed from `2.30` to `2.42`
+- Interpretation:
+  the cached-value mixed strategy materially improved non-empty result /
+  affected-row probability for `SELECT`, `UPDATE`, and `DELETE` without
+  introducing a visible stability regression in the 3-minute validation run.

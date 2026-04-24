@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <document.h>
 #include <filereadstream.h>
 #include <fstream>
@@ -272,6 +273,8 @@ struct Table {
   std::vector<Column *> *columns_;
   std::vector<Index *> *indexes_;
   std::mutex table_mutex;
+  std::mutex hit_value_mutex;
+  std::unordered_map<std::string, std::deque<std::string>> hit_value_cache;
 
   const std::string get_type() const {
     switch (type) {
