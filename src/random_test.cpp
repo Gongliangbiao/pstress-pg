@@ -1078,6 +1078,7 @@ int sum_of_all_options(Thd1 *thd) {
     options->at(Option::SELECT_ALL_ROW)->setInt(0);
     options->at(Option::SELECT_ROW_USING_PKEY)->setInt(0);
     options->at(Option::SELECT_WITH_JOIN)->setInt(0);
+    options->at(Option::SELECT_WITH_CTE)->setInt(0);
   }
   /* if delete is set as zero, disable all type of deletes */
   if (options->at(Option::NO_DELETE)->getBool()) {
@@ -3445,6 +3446,105 @@ static void select_with_join(std::vector<Table *> *all_tables, Thd1 *thd) {
   execute_sql(sql, thd);
 }
 
+static int pick_random_where_column(const Table *table, bool prefer_primary_key);
+
+static std::string random_read_source(Table *table,
+                                      int partition_child_probability = 10) {
+  if (table != nullptr && table->type == Table::PARTITION &&
+      rand_int(100) < partition_child_probability) {
+    return pg_partition_target(table);
+  }
+  return table == nullptr ? "" : table->name_;
+}
+
+// Caller must hold table->table_mutex while building a column-based predicate.
+static bool build_read_predicate_locked(Table *table, std::string &predicate) {
+  if (table == nullptr) {
+    return false;
+  }
+
+  auto where = pick_random_where_column(table, false);
+  if (where < 0) {
+    return false;
+  }
+
+  if (build_hit_oriented_where(table, predicate)) {
+    return true;
+  }
+
+  auto *column = table->columns_->at(where);
+  predicate = column->name_;
+  auto prob = rand_int(100);
+  if (rand_int(1000) < 2) {
+    predicate += " NOT BETWEEN " + column->rand_value() + " AND " +
+                 column->rand_value();
+  } else if (prob <= 90) {
+    predicate += " = " + column->rand_value();
+  } else if (prob <= 92) {
+    predicate += " >= " + column->rand_value();
+  } else if (prob <= 94) {
+    predicate += " >= " + column->rand_value() + " AND " + column->name_ +
+                 " <= " + column->rand_value();
+  } else if (prob <= 96) {
+    predicate += " IN (" + column->rand_value() + ", " + column->rand_value() +
+                 ")";
+  } else if (prob <= 98 && supports_like_predicate(column)) {
+    predicate += " LIKE " + Table::prepare_like_string(column->rand_value());
+  } else {
+    predicate += " BETWEEN " + column->rand_value() + " AND " +
+                 column->rand_value();
+  }
+  return true;
+}
+
+static std::string build_cte_base_query_locked(Table *table) {
+  if (table == nullptr) {
+    return "";
+  }
+
+  std::string sql = "SELECT * FROM " + random_read_source(table);
+  std::string predicate;
+  if (rand_int(99) < 70 && build_read_predicate_locked(table, predicate)) {
+    sql += " WHERE " + predicate;
+  }
+  sql += " LIMIT " + std::to_string(rand_int(64, 1));
+  return sql;
+}
+
+static void select_with_cte(std::vector<Table *> *all_tables, Thd1 *thd) {
+  if (all_tables == nullptr || all_tables->empty()) {
+    return;
+  }
+
+  auto *table = all_tables->at(rand_int(all_tables->size() - 1));
+  if (table == nullptr) {
+    return;
+  }
+
+  std::string base_query;
+  {
+    std::lock_guard<std::recursive_mutex> lock(table->table_mutex);
+    base_query = build_cte_base_query_locked(table);
+  }
+  if (base_query.empty()) {
+    return;
+  }
+
+  std::string sql;
+  if (rand_int(99) < 50) {
+    sql = "WITH cte_base AS (" + base_query + ") SELECT * FROM cte_base LIMIT " +
+          std::to_string(rand_int(48, 1));
+  } else {
+    sql = "WITH cte_base AS (" + base_query +
+          "), cte_window AS (SELECT * FROM cte_base LIMIT " +
+          std::to_string(rand_int(48, 1)) +
+          ") SELECT * FROM cte_window LIMIT " +
+          std::to_string(rand_int(32, 1));
+  }
+
+  execute_sql(sql, thd);
+}
+
 static int pick_random_updatable_column(const Table *table) {
   std::vector<int> candidates;
   for (size_t i = 0; i < table->columns_->size(); ++i) {
@@ -5147,12 +5247,7 @@ void Table::DeleteAllRows(Thd1 *thd) {
 }
 
 void Table::SelectAllRow(Thd1 *thd) {
-  std::string sql = "SELECT * FROM " + name_;
-  if (type == PARTITION && rand_int(100) < 98) {
-    execute_sql("SELECT * FROM " + pg_partition_target(this), thd);
-    return;
-  }
-  execute_sql(sql, thd);
+  execute_sql("SELECT * FROM " + random_read_source(this, 98), thd);
 }
 
 void Table::IndexRename(Thd1 *thd) {
@@ -5257,43 +5352,13 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 
 void Table::SelectRandomRow(Thd1 *thd) {
   table_mutex.lock();
-  auto where = pick_random_where_column(this, false);
-  if (where < 0) {
+  std::string predicate;
+  if (!build_read_predicate_locked(this, predicate)) {
     table_mutex.unlock();
     return;
   }
-  std::string sql = "SELECT * FROM " + name_;
-
-  /* if it partition table randomly pick some partition */
-  if (type == PARTITION && rand_int(10) < 2)
-    sql = "SELECT * FROM " + pg_partition_target(this);
-
-  std::string predicate;
-  if (!build_hit_oriented_where(this, predicate)) {
-    predicate = columns_->at(where)->name_;
-    auto prob = rand_int(100);
-    if (rand_int(1000) < 2)
-      predicate += " NOT BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-                   columns_->at(where)->rand_value();
-    else if (prob <= 90)
-      predicate += " = " + columns_->at(where)->rand_value();
-    else if (prob <= 92)
-      predicate += " >= " + columns_->at(where)->rand_value();
-    else if (prob <= 94)
-      predicate += " >= " + columns_->at(where)->rand_value() + " AND " +
-                   columns_->at(where)->name_ +
-                   " <= " + columns_->at(where)->rand_value();
-    else if (prob <= 96)
-      predicate += " IN (" + columns_->at(where)->rand_value() + ", " +
-                   columns_->at(where)->rand_value() + ")";
-    else if (prob <= 98 && supports_like_predicate(columns_->at(where)))
-      predicate += " LIKE " +
-                   prepare_like_string(columns_->at(where)->rand_value());
-    else
-      predicate += " BETWEEN " + columns_->at(where)->rand_value() + " AND " +
-                   columns_->at(where)->rand_value();
-  }
-  sql += " WHERE " + predicate;
+  std::string sql = "SELECT * FROM " + random_read_source(this) + " WHERE " +
+                    predicate;
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -6152,6 +6217,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::SELECT_WITH_JOIN:
       select_with_join(all_session_tables, this);
+      break;
+    case Option::SELECT_WITH_CTE:
+      select_with_cte(all_session_tables, this);
       break;
     case Option::INSERT_RANDOM_ROW:
       table->InsertRandomRow(this);

@@ -641,3 +641,60 @@
   - `25P02`: current transaction aborted in legacy random transaction flow
 - No new join-specific structural failures such as missing relation/column
   errors were observed in the 3-minute validation run.
+
+## 2026-04-25 - Iteration 15: non-recursive CTE query path
+
+### Scope
+
+- Added a dedicated SQL workload option `--select-with-cte` for read-only,
+  non-recursive PostgreSQL `WITH` queries.
+- Wired `--select-with-cte` into the main random-query dispatcher as a separate
+  query family alongside the existing single-table selects and join selects.
+- Kept the first version intentionally narrow:
+  - read-only only
+  - non-recursive only
+  - no new metadata object type
+  - only one-table source queries inside the CTE body
+- Implemented two CTE shapes for the first pass:
+  - `WITH cte_base AS (SELECT ...) SELECT * FROM cte_base`
+  - `WITH cte_base AS (SELECT ...), cte_window AS (SELECT * FROM cte_base LIMIT ...) SELECT * FROM cte_window`
+- Refactored reusable read-query helpers for:
+  - random partition-aware source selection
+  - shared single-table read predicate generation
+- Added `--select-with-cte` to `--no-select` disabling behavior and documented
+  it in [README.md](/Users/gongliangbiao/Desktop/Codes/pstress/README.md).
+- Fixed option-parser enum spacing so `INVALID_OPTION` no longer collides with
+  short-option codes after adding more SQL workload options.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Red baseline before implementation:
+  `--grammar-sql=0 --select-with-join=0 --select-with-cte=500` failed
+  immediately with `unrecognized option '--select-with-cte=500'`
+- Green baseline after implementation:
+  `--no-ddl --no-insert --no-update --no-delete --select-all-rows=0 --select-single-row=0 --select-with-join=0 --grammar-sql=0 --select-with-cte=500`
+- Green baseline result: completed with exit code `0`
+- Green baseline produced dedicated CTE SQL; sample shapes:
+  - `WITH cte_base AS (SELECT * FROM tt_3 WHERE i1 = 1905 LIMIT 16) SELECT * FROM cte_base LIMIT 12`
+  - `WITH cte_base AS (...), cte_window AS (SELECT * FROM cte_base LIMIT 32) SELECT * FROM cte_window LIMIT 32`
+- 30-second smoke:
+  `--threads=1 --seconds=30 --grammar-sql=0 --select-with-join=0 --select-with-cte=120`
+- Smoke result: completed with exit code `0`
+- Smoke summary: `200/178557` failed, `99.89%` successful
+- Smoke observed CTE count in thread SQL log: `11045`
+- Smoke remaining error codes were existing workload classes:
+  - `23505`: duplicate unique/primary values
+  - `23503`: FK conflicts
+  - `25P02`: current transaction aborted in legacy random transaction flow
+- 3-minute validation:
+  `--threads=2 --seconds=180 --grammar-sql=0 --select-with-join=0 --select-with-cte=120`
+- 3-minute result: completed with exit code `0`
+- 3-minute summary: `236/283625` failed, `99.92%` successful
+- 3-minute observed CTE count across thread SQL logs: `17305`
+- 3-minute remaining error codes:
+  - `23505`: duplicate unique/primary values
+  - `23503`: FK conflicts
+  - `25P02`: current transaction aborted in legacy random transaction flow
+- No new CTE-specific structural failures such as syntax errors or missing
+  relation/column errors were observed in the 3-minute validation run.

@@ -23,7 +23,7 @@ This checklist records that decision against the current PostgreSQL-oriented
 ### Adopt first
 
 - `JOIN` query testing - implemented in Iteration 14
-- non-recursive `CTE` testing
+- non-recursive `CTE` testing - implemented in Iteration 15
 - prepared statement testing
 - read-only execution plan sampling
 
@@ -100,6 +100,10 @@ Estimated effort:
 Decision:
 
 - adopt
+
+Status:
+
+- implemented in [pg_fix_validation_log.md](/Users/gongliangbiao/Desktop/Codes/pstress/pg_fix_validation_log.md) Iteration 15
 
 Why:
 

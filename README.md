@@ -137,6 +137,7 @@ Option | Function | Example | Default
 --select-all-row | select all data probability | --select-all-row=10 | default#: 8
 --select-single-row | Select table using single row | --select-single-row=20 | default#: 800
 --select-with-join | metadata-driven INNER JOIN between compatible tables | --select-with-join=40 | default#: 40
+--select-with-cte | non-recursive read-only WITH queries | --select-with-cte=30 | default#: 30
 --set-variable | set mysqld variable during the load.(session|global) | --set-variable=autocommit=OFF | default#: 3
 --socket | Socket file to use | | default: /tmp/socket.sock
 --sof | server options file, MySQL server options file, picks some of the mysqld options, and try to set them during the load , using set global and set session | --sof=innodb_temp_tablespace_encrypt=on=off | default:

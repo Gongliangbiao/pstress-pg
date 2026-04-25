@@ -252,6 +252,12 @@ void add_options() {
   opt->setInt(40);
   opt->setSQL();
 
+  opt = newOption(Option::INT, Option::SELECT_WITH_CTE, "select-with-cte");
+  opt->help =
+      "Select rows using non-recursive read-only WITH queries";
+  opt->setInt(30);
+  opt->setSQL();
+
   /* Insert random row */
   opt = newOption(Option::INT, Option::INSERT_RANDOM_ROW, "insert-row");
   opt->help = "insert random row";
