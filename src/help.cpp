@@ -521,6 +521,17 @@ void add_options() {
               "such transaction will be rollback to some savepoint";
   opt->setInt(10);
 
+  /* transactional ddl probability */
+  opt = newOption(Option::INT, Option::TRX_DDL_PROB_K, "trx-ddl-prob-k");
+  opt->help =
+      "probability(out of 1000) of running a dedicated DDL-only transaction";
+  opt->setInt(0);
+
+  /* transactional ddl size */
+  opt = newOption(Option::INT, Option::TRX_DDL_SIZE, "trx-ddl-size");
+  opt->help = "maximum number of DDL statements in one dedicated DDL transaction";
+  opt->setInt(3);
+
   /* steps */
   opt = newOption(Option::INT, Option::STEP, "step");
   opt->help = "current step in pstress script";

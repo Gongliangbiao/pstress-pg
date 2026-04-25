@@ -146,6 +146,8 @@ Option | Function | Example | Default
 --threads | The number of threads to use | | default#: 1
 --truncate | truncate table | --truncate=5 | default#: 1
 --trx-prb-k | probability(out of 1000) of combining sql as single trx | | default#: 10
+--trx-ddl-prob-k | probability(out of 1000) of running a dedicated DDL-only transaction | | default#: 0
+--trx-ddl-size | maximum number of DDL statements in one dedicated DDL transaction | | default#: 3
 --trx-size | average size of each trx | | default#: 100
 --undo-tbs-count | Number of default undo tablespaces | --undo-tbs-count=3 | default#: 3
 --undo-tbs-sql | Assign probability of running create/alter/drop undo tablespace | --undo-tbs-sql=50 | default#: 1

@@ -496,3 +496,96 @@
   `6`, which is below the new hard cap of `8`.
 - No table-creation regression attributable to generated-column explosion was
   observed in the 300-column validation run.
+
+## 2026-04-24 - Iteration 12: dedicated transactional DDL executor
+
+### Scope
+
+- Added a separate PostgreSQL transactional-DDL execution path controlled by:
+  - `--trx-ddl-prob-k`
+  - `--trx-ddl-size`
+- Kept the legacy generic transaction path unchanged:
+  transactional DDL does not reuse `trx-size`, `commit-prob`, or
+  `savepoint-prob-k`.
+- Added transactional DDL metadata safety:
+  - per-scratch-table-list snapshot / restore
+  - per-existing-table snapshot / restore
+  - DDL serialization between ordinary workload DDL and transactional DDL
+- Added best-effort cleanup for feature-created scratch tables at thread end so
+  committed scratch objects do not accumulate in the schema.
+- Hardened `SELECT/UPDATE/DELETE` random predicate selection so tables that
+  temporarily lack the old preferred predicate types return early instead of
+  spinning forever.
+- Fixed PostgreSQL `DROP COLUMN` metadata handling so any dependent index is
+  removed from in-memory metadata entirely, matching PostgreSQL behavior.
+- Tightened `ColumnRename()` so rename attempts that would collide with an
+  existing column name are skipped instead of failing repeatedly.
+- Tightened the first-version transactional DDL subset for stability:
+  - scratch tables: `CREATE/DROP TABLE`, safe `ADD COLUMN`, `DROP COLUMN`,
+    `ADD/DROP/RENAME INDEX`, `RENAME COLUMN`
+  - existing tables: safe `ADD COLUMN`, `ADD/DROP/RENAME INDEX`,
+    `RENAME COLUMN`
+  - excluded: shared-table `DROP COLUMN`, `modify-column`, `truncate`,
+    `recreate-table`, partition DDL
+- Made transactional `ADD COLUMN` use a conservative scalar PostgreSQL-safe
+  type subset instead of the full random `AddColumn()` surface.
+- Added an existing-table transactional add-column cap of `256` columns to
+  avoid low-value aborts from column-count pressure.
+- Allowed isolated validation mode with `--no-ddl`:
+  ordinary random DDL is disabled, but explicitly enabled transactional DDL
+  still runs.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Initial feature-only smoke:
+  `--threads=1 --seconds=30 --trx-prob-k=0 --trx-ddl-prob-k=200 --trx-ddl-size=3`
+- Initial smoke result: completed with exit code `0`
+- Initial smoke summary: `178/65392` failed, `99.73%` successful
+- Initial smoke removed the original structural regressions:
+  no `25P02`, no thread failures, no scratch-index rename drift, no duplicate
+  column-rename collisions, and no scratch `DROP COLUMN` dependency failures.
+- A mixed 3-minute run with ordinary random DDL still enabled completed, but
+  was dominated by unrelated legacy wide-table pressure:
+  `54000` (`row is too big`) and `54011` (`tables can have at most 1600 columns`).
+- Based on that result, validation was intentionally isolated using
+  `--no-ddl` so the new transactional-DDL path could be measured without
+  unrelated ordinary DDL noise.
+- Isolated smoke:
+  `--no-ddl --threads=1 --seconds=30 --trx-prob-k=0 --trx-ddl-prob-k=200 --trx-ddl-size=3`
+- Isolated smoke result: completed with exit code `0`
+- Isolated smoke summary: `174/93055` failed, `99.81%` successful
+- Isolated smoke remaining error codes: `23505`, `23503`
+- Isolated 3-minute validation:
+  `--no-ddl --threads=2 --seconds=180 --trx-prob-k=0 --trx-ddl-prob-k=200 --trx-ddl-size=3`
+- Isolated 3-minute result: completed with exit code `0`
+- Isolated 3-minute summary: `331/517789` failed, `99.94%` successful
+- Isolated 3-minute remaining error codes:
+  - `23505`: duplicate unique/primary values
+  - `23503`: FK conflicts
+  - `40P01`: deadlock
+- No `25P02`, `Thread N failed`, `relation "trxddl..." does not exist`,
+  duplicate rename-collision errors, `54000`, or `54011` were observed in the
+  isolated transactional-DDL validation run.
+
+## 2026-04-25 - Iteration 13: `pstress.cpp` cleanup fixes
+
+### Scope
+
+- Fixed `realpath(argv[0], nullptr)` ownership in
+  [src/pstress.cpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/pstress.cpp):
+  the returned buffer is now managed with `free(3)` semantics instead of the
+  default `std::unique_ptr<char>` deleter.
+- Hardened executable-path initialization so a failed `realpath()` falls back
+  to `"."` instead of passing a null pointer into `dirname()`.
+- Added stable storage for `binary_fullpath` so the exported pointer refers to
+  an owned `std::string` buffer rather than a transient smart-pointer-managed
+  allocation.
+- Removed unreachable code in `main()`:
+  - deleted the dead `exit(EXIT_FAILURE);` after `if (c == -1) break;`
+  - deleted dead `break;` statements after `exit(EXIT_FAILURE);` in the CLI
+    help and invalid-option branches
+
+### Validation
+
+- Not run in this iteration, per request.

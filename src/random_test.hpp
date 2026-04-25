@@ -272,7 +272,7 @@ struct Table {
   // std::string data_directory; todo add corressponding code
   std::vector<Column *> *columns_;
   std::vector<Index *> *indexes_;
-  std::mutex table_mutex;
+  std::recursive_mutex table_mutex;
   std::mutex hit_value_mutex;
   std::unordered_map<std::string, std::deque<std::string>> hit_value_cache;
 

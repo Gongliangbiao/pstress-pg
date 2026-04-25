@@ -48,6 +48,9 @@ std::atomic<size_t> check_failures(0);
 std::atomic<size_t> table_completed(0);
 std::atomic_flag lock_stream = ATOMIC_FLAG_INIT;
 std::atomic<bool> run_query_failed(false);
+std::mutex ddl_workload_mutex;
+std::atomic<unsigned long long> trx_ddl_table_seq(0);
+static constexpr size_t k_transactional_ddl_existing_column_cap = 256;
 /* partition type supported by system */
 std::vector<Partition::PART_TYPE> Partition::supported;
 const int maximum_records_in_each_parititon_list = 100;
@@ -483,6 +486,421 @@ static bool referenced_by_fk(const Table *table) {
     }
   }
   return false;
+}
+
+static Column *clone_column_for_table(const Column *column, Table *owner) {
+  Column *copy = nullptr;
+  auto type_name = Column::col_type_to_string(column->type_);
+
+  if (column->type_ == Column::GENERATED) {
+    const auto *generated = static_cast<const Generated_Column *>(column);
+    copy = new Generated_Column(column->name_, owner, generated->str,
+                                Column::col_type_to_string(generated->generate_type()));
+  } else if (column->type_ == Column::BLOB) {
+    const auto *blob = static_cast<const Blob_Column *>(column);
+    copy = new Blob_Column(column->name_, owner, blob->sub_type);
+  } else {
+    copy = new Column(column->name_, type_name, owner);
+  }
+
+  copy->null = column->null;
+  copy->length = column->length;
+  copy->default_value = column->default_value;
+  copy->primary_key = column->primary_key;
+  copy->auto_increment = column->auto_increment;
+  copy->referenced_key = column->referenced_key;
+  copy->compressed = column->compressed;
+  copy->unique_values = column->unique_values;
+  return copy;
+}
+
+static Index *clone_index_for_table(const Index *index, Table *owner) {
+  auto *copy = new Index(index->name_);
+  copy->unique = index->unique;
+  for (auto *ind_col : *index->columns_) {
+    Column *column = nullptr;
+    for (auto *candidate : *owner->columns_) {
+      if (candidate->name_ == ind_col->column->name_) {
+        column = candidate;
+        break;
+      }
+    }
+    if (column == nullptr) {
+      continue;
+    }
+    auto *copy_col = new Ind_col(column, ind_col->desc);
+    copy_col->length = ind_col->length;
+    copy->AddInternalColumn(copy_col);
+  }
+  return copy;
+}
+
+static Table *clone_table_metadata(const Table *table) {
+  Table *copy = nullptr;
+  switch (table->type) {
+  case Table::NORMAL:
+    copy = new Table(table->name_);
+    break;
+  case Table::TEMPORARY:
+    copy = new Temporary_table(table->name_);
+    break;
+  default:
+    throw std::runtime_error("transactional ddl clone only supports normal/temporary tables");
+  }
+
+  copy->type = table->type;
+  copy->storage_engine = table->storage_engine;
+  copy->storage_layout = table->storage_layout;
+  copy->storage_tablespace = table->storage_tablespace;
+  copy->storage_compression = table->storage_compression;
+  copy->storage_encryption = table->storage_encryption;
+  copy->storage_block_size = table->storage_block_size;
+  copy->number_of_initial_records = table->number_of_initial_records;
+  copy->auto_inc_index = table->auto_inc_index;
+
+  for (auto *column : *table->columns_) {
+    copy->AddInternalColumn(clone_column_for_table(column, copy));
+  }
+  for (auto *index : *table->indexes_) {
+    copy->AddInternalIndex(clone_index_for_table(index, copy));
+  }
+
+  {
+    std::lock_guard<std::mutex> guard(
+        const_cast<std::mutex &>(table->hit_value_mutex));
+    copy->hit_value_cache = table->hit_value_cache;
+  }
+  return copy;
+}
+
+static void clear_table_metadata(Table *table) {
+  for (auto *index : *table->indexes_) {
+    delete index;
+  }
+  table->indexes_->clear();
+
+  for (auto *column : *table->columns_) {
+    delete column;
+  }
+  table->columns_->clear();
+}
+
+static void restore_table_metadata(Table *target, const Table *snapshot) {
+  std::lock_guard<std::recursive_mutex> guard(target->table_mutex);
+  clear_table_metadata(target);
+
+  target->name_ = snapshot->name_;
+  target->type = snapshot->type;
+  target->storage_engine = snapshot->storage_engine;
+  target->storage_layout = snapshot->storage_layout;
+  target->storage_tablespace = snapshot->storage_tablespace;
+  target->storage_compression = snapshot->storage_compression;
+  target->storage_encryption = snapshot->storage_encryption;
+  target->storage_block_size = snapshot->storage_block_size;
+  target->number_of_initial_records = snapshot->number_of_initial_records;
+  target->auto_inc_index = snapshot->auto_inc_index;
+
+  for (auto *column : *snapshot->columns_) {
+    target->AddInternalColumn(clone_column_for_table(column, target));
+  }
+  for (auto *index : *snapshot->indexes_) {
+    target->AddInternalIndex(clone_index_for_table(index, target));
+  }
+
+  {
+    std::lock_guard<std::mutex> guard_cache(target->hit_value_mutex);
+    target->hit_value_cache = snapshot->hit_value_cache;
+  }
+}
+
+static void delete_table_list(std::vector<Table *> &tables) {
+  for (auto *table : tables) {
+    delete table;
+  }
+  tables.clear();
+}
+
+static std::vector<Table *> clone_table_list(const std::vector<Table *> &tables) {
+  std::vector<Table *> copies;
+  copies.reserve(tables.size());
+  for (auto *table : tables) {
+    copies.push_back(clone_table_metadata(table));
+  }
+  return copies;
+}
+
+static Column::COLUMN_TYPES random_trx_ddl_scratch_column_type() {
+  static const std::vector<Column::COLUMN_TYPES> types = {
+      Column::INT,      Column::BIGINT,  Column::NUMERIC, Column::VARCHAR,
+      Column::CHAR,     Column::BOOL,    Column::DATE,    Column::TIME,
+      Column::TIMESTAMP, Column::INET,   Column::CIDR,    Column::UUID};
+  return types.at(rand_int(types.size() - 1));
+}
+
+static bool run_transactional_safe_add_column(Table *table, Thd1 *thd) {
+  table->table_mutex.lock();
+  Column *column = nullptr;
+  for (int attempt = 0; attempt < 64 && column == nullptr; ++attempt) {
+    auto type = random_trx_ddl_scratch_column_type();
+    auto name = "tdN" + std::to_string(rand_int(100000, 1000)) + "_" +
+                std::to_string(attempt);
+    auto *candidate = new Column(name, table, type);
+    if (column_name_exists(table, candidate->name_)) {
+      delete candidate;
+      continue;
+    }
+    column = candidate;
+  }
+
+  if (column == nullptr) {
+    table->table_mutex.unlock();
+    return false;
+  }
+
+  auto sql = "ALTER TABLE " + table->name_ + " ADD COLUMN " + column->definition();
+  table->table_mutex.unlock();
+
+  if (execute_sql(sql, thd)) {
+    table->table_mutex.lock();
+    if (!column_name_exists(table, column->name_)) {
+      table->AddInternalColumn(column);
+    } else {
+      delete column;
+    }
+    table->table_mutex.unlock();
+    return true;
+  }
+
+  delete column;
+  return false;
+}
+
+static Table *build_trx_ddl_scratch_table(Thd1 *thd) {
+  auto id = ++trx_ddl_table_seq;
+  auto *table = new Table("trxddl_t" + std::to_string(thd->thread_id) + "_" +
+                          std::to_string(id));
+  table->type = Table::NORMAL;
+  table->number_of_initial_records = 0;
+
+  auto *pk = new Column("pkey", table, Column::INT);
+  pk->primary_key = true;
+  pk->auto_increment = true;
+  table->AddInternalColumn(pk);
+
+  int extra_columns = rand_int(5, 2);
+  for (int i = 0; i < extra_columns; ++i) {
+    auto type = random_trx_ddl_scratch_column_type();
+    auto name = "trx_" + std::to_string(i);
+    Column *column = nullptr;
+    if (type == Column::BLOB) {
+      column = new Blob_Column(name, table);
+    } else {
+      column = new Column(name, table, type);
+    }
+    table->AddInternalColumn(column);
+  }
+
+  return table;
+}
+
+static Table *pick_transactional_ddl_target_table() {
+  std::vector<Table *> candidates;
+  for (auto *table : *all_tables) {
+    if (table->type != Table::NORMAL || referenced_by_fk(table)) {
+      continue;
+    }
+    candidates.push_back(table);
+  }
+  if (candidates.empty()) {
+    return nullptr;
+  }
+  return candidates.at(rand_int(candidates.size() - 1));
+}
+
+static bool transactional_ddl_enabled() {
+  return options->at(Option::TRX_DDL_PROB_K)->getInt() > 0 &&
+         options->at(Option::TRX_DDL_SIZE)->getInt() > 0 &&
+         !options->at(Option::ONLY_CL_SQL)->getBool() &&
+         !options->at(Option::ONLY_CL_DDL)->getBool();
+}
+
+enum class TransactionalDDLOp {
+  CREATE_TABLE,
+  DROP_TABLE,
+  ADD_COLUMN,
+  DROP_COLUMN,
+  ADD_INDEX,
+  DROP_INDEX,
+  RENAME_COLUMN,
+  RENAME_INDEX
+};
+
+static bool run_transactional_ddl_on_table(Table *table, Thd1 *thd) {
+  std::vector<TransactionalDDLOp> ops = {
+      TransactionalDDLOp::ADD_INDEX,     TransactionalDDLOp::DROP_INDEX,
+      TransactionalDDLOp::RENAME_COLUMN, TransactionalDDLOp::RENAME_INDEX};
+  if (table->columns_->size() < k_transactional_ddl_existing_column_cap) {
+    ops.push_back(TransactionalDDLOp::ADD_COLUMN);
+  }
+  auto op = ops.at(rand_int(ops.size() - 1));
+  switch (op) {
+  case TransactionalDDLOp::ADD_COLUMN:
+    return run_transactional_safe_add_column(table, thd);
+    break;
+  case TransactionalDDLOp::ADD_INDEX:
+    table->AddIndex(thd);
+    break;
+  case TransactionalDDLOp::DROP_INDEX:
+    table->DropIndex(thd);
+    break;
+  case TransactionalDDLOp::RENAME_COLUMN:
+    table->ColumnRename(thd);
+    break;
+  case TransactionalDDLOp::RENAME_INDEX:
+    table->IndexRename(thd);
+    break;
+  default:
+    return false;
+  }
+  return thd->success;
+}
+
+static bool run_transactional_ddl_on_scratch(
+    Thd1 *thd, std::vector<Table *> &trx_ddl_tables) {
+  std::vector<TransactionalDDLOp> ops = {
+      TransactionalDDLOp::CREATE_TABLE,  TransactionalDDLOp::ADD_COLUMN,
+      TransactionalDDLOp::DROP_COLUMN,   TransactionalDDLOp::ADD_INDEX,
+      TransactionalDDLOp::DROP_INDEX,    TransactionalDDLOp::RENAME_COLUMN,
+      TransactionalDDLOp::RENAME_INDEX,  TransactionalDDLOp::DROP_TABLE};
+
+  if (trx_ddl_tables.empty()) {
+    ops = {TransactionalDDLOp::CREATE_TABLE};
+  }
+
+  auto op = ops.at(rand_int(ops.size() - 1));
+  if (op == TransactionalDDLOp::CREATE_TABLE) {
+    auto *table = build_trx_ddl_scratch_table(thd);
+    bool success = execute_sql(table->definition(false), thd);
+    if (success) {
+      trx_ddl_tables.push_back(table);
+    } else {
+      delete table;
+    }
+    return success;
+  }
+
+  if (trx_ddl_tables.empty()) {
+    return false;
+  }
+
+  auto pos = rand_int(trx_ddl_tables.size() - 1);
+  auto *table = trx_ddl_tables.at(pos);
+  switch (op) {
+  case TransactionalDDLOp::DROP_TABLE: {
+    if (!execute_sql("DROP TABLE " + table->name_, thd)) {
+      return false;
+    }
+    delete table;
+    trx_ddl_tables.erase(trx_ddl_tables.begin() + pos);
+    return true;
+  }
+  case TransactionalDDLOp::ADD_COLUMN:
+    return run_transactional_safe_add_column(table, thd);
+  case TransactionalDDLOp::DROP_COLUMN:
+    table->DropColumn(thd);
+    break;
+  case TransactionalDDLOp::ADD_INDEX:
+    table->AddIndex(thd);
+    break;
+  case TransactionalDDLOp::DROP_INDEX:
+    table->DropIndex(thd);
+    break;
+  case TransactionalDDLOp::RENAME_COLUMN:
+    table->ColumnRename(thd);
+    break;
+  case TransactionalDDLOp::RENAME_INDEX:
+    table->IndexRename(thd);
+    break;
+  default:
+    return false;
+  }
+  return thd->success;
+}
+
+static bool run_transactional_ddl_block(Thd1 *thd,
+                                        std::vector<Table *> &trx_ddl_tables) {
+  auto max_size = options->at(Option::TRX_DDL_SIZE)->getInt();
+  if (max_size <= 0) {
+    return false;
+  }
+
+  auto scratch_snapshot = clone_table_list(trx_ddl_tables);
+  Table *target = nullptr;
+  Table *target_snapshot = nullptr;
+  bool scratch_mode = trx_ddl_tables.empty() || rand_int(1) == 0;
+  if (!scratch_mode) {
+    target = pick_transactional_ddl_target_table();
+    if (target == nullptr) {
+      scratch_mode = true;
+    }
+  }
+
+  if (scratch_mode == false && target != nullptr) {
+    target->table_mutex.lock();
+    target_snapshot = clone_table_metadata(target);
+  }
+
+  bool committed = false;
+  bool started = false;
+  bool rolled_back = false;
+  int statements = 0;
+  thd->ddl_query = true;
+
+  if (!execute_sql("START TRANSACTION", thd)) {
+    goto cleanup;
+  }
+  started = true;
+
+  statements = rand_int(max_size, 1);
+  for (int i = 0; i < statements; ++i) {
+    bool success = scratch_mode ? run_transactional_ddl_on_scratch(thd, trx_ddl_tables)
+                                : run_transactional_ddl_on_table(target, thd);
+    if (!success) {
+      execute_sql("ROLLBACK", thd);
+      rolled_back = true;
+      goto cleanup;
+    }
+  }
+
+  if (!execute_sql("COMMIT", thd)) {
+    goto cleanup;
+  }
+  committed = true;
+
+cleanup:
+  if (!committed && started && !rolled_back) {
+    execute_sql("ROLLBACK", thd);
+  }
+
+  if (!committed) {
+    delete_table_list(trx_ddl_tables);
+    trx_ddl_tables = std::move(scratch_snapshot);
+    if (target != nullptr && target_snapshot != nullptr) {
+      restore_table_metadata(target, target_snapshot);
+    }
+  } else {
+    delete_table_list(scratch_snapshot);
+  }
+
+  if (target_snapshot != nullptr) {
+    delete target_snapshot;
+  }
+  if (target != nullptr) {
+    target->table_mutex.unlock();
+  }
+
+  thd->ddl_query = false;
+  return committed;
 }
 
 static bool result_num_fields_safe(Thd1 *thd, int req) {
@@ -2734,6 +3152,122 @@ static bool build_hit_oriented_where(Table *table, std::string &predicate) {
   return true;
 }
 
+static int pick_random_updatable_column(const Table *table) {
+  std::vector<int> candidates;
+  for (size_t i = 0; i < table->columns_->size(); ++i) {
+    if (table->columns_->at(i)->type_ != Column::GENERATED) {
+      candidates.push_back(static_cast<int>(i));
+    }
+  }
+  if (candidates.empty()) {
+    return -1;
+  }
+  return candidates.at(rand_int(candidates.size() - 1));
+}
+
+static int pick_random_where_column(const Table *table, bool prefer_primary_key) {
+  std::vector<int> preferred;
+  std::vector<int> jsonb_columns;
+  std::vector<int> bool_columns;
+  std::vector<int> integer_columns;
+  int primary_key = -1;
+  bool only_bool = true;
+
+  for (size_t i = 0; i < table->columns_->size(); ++i) {
+    auto *column = table->columns_->at(i);
+    if (column->primary_key) {
+      primary_key = static_cast<int>(i);
+    }
+    if (column->type_ != Column::BOOL) {
+      only_bool = false;
+    }
+
+    switch (column->type_) {
+    case Column::SMALLINT:
+    case Column::INT:
+    case Column::BIGINT:
+    case Column::NUMERIC:
+    case Column::DATE:
+    case Column::TIME:
+    case Column::TIMETZ:
+    case Column::TIMESTAMP:
+    case Column::TIMESTAMPTZ:
+    case Column::INTERVAL:
+    case Column::BIT:
+    case Column::VARBIT:
+    case Column::INET:
+    case Column::CIDR:
+    case Column::MACADDR:
+    case Column::MACADDR8:
+    case Column::MONEY:
+    case Column::FLOAT:
+    case Column::DOUBLE:
+    case Column::VARCHAR:
+    case Column::CHAR:
+    case Column::BLOB:
+    case Column::BYTEA:
+    case Column::UUID:
+    case Column::GENERATED:
+      preferred.push_back(static_cast<int>(i));
+      break;
+    case Column::JSONB:
+      jsonb_columns.push_back(static_cast<int>(i));
+      break;
+    case Column::BOOL:
+      bool_columns.push_back(static_cast<int>(i));
+      break;
+    case Column::INTEGER:
+      integer_columns.push_back(static_cast<int>(i));
+      break;
+    case Column::JSON:
+    case Column::XML:
+    case Column::TSVECTOR:
+    case Column::TSQUERY:
+    case Column::POINT:
+    case Column::LINE:
+    case Column::LSEG:
+    case Column::BOX:
+    case Column::PATH:
+    case Column::POLYGON:
+    case Column::CIRCLE:
+    case Column::INTARRAY:
+    case Column::BIGINTARRAY:
+    case Column::NUMERICARRAY:
+    case Column::TEXTARRAY:
+    case Column::BOOLARRAY:
+    case Column::TIMESTAMPARRAY:
+    case Column::INT4RANGE:
+    case Column::INT8RANGE:
+    case Column::NUMRANGE:
+    case Column::TSRANGE:
+    case Column::TSTZRANGE:
+    case Column::DATERANGE:
+    case Column::COLUMN_MAX:
+      break;
+    }
+  }
+
+  if (prefer_primary_key && primary_key != -1 && rand_int(100) <= 50) {
+    return primary_key;
+  }
+  if (!preferred.empty()) {
+    return preferred.at(rand_int(preferred.size() - 1));
+  }
+  if (!jsonb_columns.empty()) {
+    return jsonb_columns.at(rand_int(jsonb_columns.size() - 1));
+  }
+  if (!integer_columns.empty()) {
+    return integer_columns.at(rand_int(integer_columns.size() - 1));
+  }
+  if (!bool_columns.empty() && only_bool) {
+    return bool_columns.at(rand_int(bool_columns.size() - 1));
+  }
+  if (!bool_columns.empty()) {
+    return bool_columns.at(rand_int(bool_columns.size() - 1));
+  }
+  return -1;
+}
+
 /* index definition */
 std::string Index::definition() {
   return "INDEX " + name_ + "(" + index_column_list(this) + ") ";
@@ -3997,13 +4531,8 @@ void Table::DropColumn(Thd1 *thd) {
            id_col != index->columns_->end(); id_col++) {
         auto ic = *id_col;
         if (ic->column->name_.compare(name) == 0) {
-          if (index->columns_->size() == 1) {
-            delete index;
-            indexes_to_drop.push_back(id - indexes_->begin());
-          } else {
-            delete ic;
-            index->columns_->erase(id_col);
-          }
+          delete index;
+          indexes_to_drop.push_back(id - indexes_->begin());
           break;
         }
       }
@@ -4020,7 +4549,6 @@ void Table::DropColumn(Thd1 *thd) {
     for (auto pos = columns_->begin(); pos != columns_->end(); pos++) {
       auto col = *pos;
       if (col->name_.compare(name) == 0) {
-        col->mutex.lock();
         delete col;
         columns_->erase(pos);
         break;
@@ -4377,6 +4905,10 @@ void Table::ColumnRename(Thd1 *thd) {
     new_name = name.substr(0, name.length() - s);
   else
     new_name = name + new_name;
+  if (column_name_exists(this, new_name)) {
+    table_mutex.unlock();
+    return;
+  }
   std::string sql =
       "ALTER TABLE " + name_ + " RENAME COLUMN " + name + " To " + new_name;
   table_mutex.unlock();
@@ -4393,94 +4925,10 @@ void Table::ColumnRename(Thd1 *thd) {
 
 void Table::DeleteRandomRow(Thd1 *thd) {
   table_mutex.lock();
-  auto where = -1;
-  bool only_bool = true;
-  int pk_pos = -1;
-
-  for (size_t i = 0; i < columns_->size(); i++) {
-    auto col = columns_->at(i);
-    if (col->type_ != Column::BOOL)
-      only_bool = false;
-    if (col->primary_key)
-      pk_pos = i;
-  }
-
-  /* 50% time we use primary key column */
-  if (pk_pos != -1 && rand_int(100) > 50)
-    where = pk_pos;
-  else {
-    /* iterate over and over to find a valid column */
-    while (where < 0) {
-      auto col_pos = rand_int(columns_->size() - 1);
-      switch (columns_->at(col_pos)->type_) {
-	      case Column::BOOL:
-	        if (only_bool || rand_int(1000) == 0)
-	          where = col_pos;
-	        break;
-	      case Column::SMALLINT:
-	      case Column::INT:
-	      case Column::BIGINT:
-	      case Column::NUMERIC:
-	      case Column::DATE:
-	      case Column::TIME:
-	      case Column::TIMETZ:
-	      case Column::TIMESTAMP:
-	      case Column::TIMESTAMPTZ:
-	      case Column::INTERVAL:
-	      case Column::BIT:
-	      case Column::VARBIT:
-	      case Column::INET:
-	      case Column::CIDR:
-	      case Column::MACADDR:
-	      case Column::MACADDR8:
-	      case Column::MONEY:
-	      case Column::FLOAT:
-	      case Column::DOUBLE:
-	      case Column::VARCHAR:
-	      case Column::CHAR:
-	      case Column::BLOB:
-	      case Column::BYTEA:
-	      case Column::UUID:
-	      case Column::GENERATED:
-	        where = col_pos;
-	        break;
-	      case Column::JSONB:
-	        if (rand_int(1000) < 50)
-	          where = col_pos;
-	        break;
-	      case Column::JSON:
-	        break;
-	      case Column::XML:
-	      case Column::TSVECTOR:
-	      case Column::TSQUERY:
-	      case Column::POINT:
-	      case Column::LINE:
-	      case Column::LSEG:
-	      case Column::BOX:
-	      case Column::PATH:
-	      case Column::POLYGON:
-	      case Column::CIRCLE:
-	      case Column::INTARRAY:
-	      case Column::BIGINTARRAY:
-	      case Column::NUMERICARRAY:
-	      case Column::TEXTARRAY:
-	      case Column::BOOLARRAY:
-	      case Column::TIMESTAMPARRAY:
-	      case Column::INT4RANGE:
-	      case Column::INT8RANGE:
-	      case Column::NUMRANGE:
-	      case Column::TSRANGE:
-	      case Column::TSTZRANGE:
-	      case Column::DATERANGE:
-	        break;
-      case Column::INTEGER:
-        if (rand_int(1000) < 10)
-          where = col_pos;
-        break;
-      case Column::COLUMN_MAX:
-        break;
-      }
-    }
+  auto where = pick_random_where_column(this, true);
+  if (where < 0) {
+    table_mutex.unlock();
+    return;
   }
   std::string sql = "DELETE FROM " + name_;
 
@@ -4516,77 +4964,10 @@ void Table::DeleteRandomRow(Thd1 *thd) {
 
 void Table::SelectRandomRow(Thd1 *thd) {
   table_mutex.lock();
-  auto where = -1;
-  while (where < 0) {
-    auto col_pos = rand_int(columns_->size() - 1);
-    switch (columns_->at(col_pos)->type_) {
-	    case Column::BOOL:
-	      if (rand_int(1000) < 10)
-	        where = col_pos;
-	      break;
-	    case Column::SMALLINT:
-	    case Column::INT:
-	    case Column::BIGINT:
-	    case Column::NUMERIC:
-	    case Column::DATE:
-	    case Column::TIME:
-	    case Column::TIMETZ:
-	    case Column::TIMESTAMP:
-	    case Column::TIMESTAMPTZ:
-	    case Column::INTERVAL:
-	    case Column::BIT:
-	    case Column::VARBIT:
-	    case Column::INET:
-	    case Column::CIDR:
-	    case Column::MACADDR:
-	    case Column::MACADDR8:
-	    case Column::MONEY:
-	    case Column::FLOAT:
-	    case Column::DOUBLE:
-	    case Column::VARCHAR:
-	    case Column::CHAR:
-	    case Column::BLOB:
-	    case Column::BYTEA:
-	    case Column::UUID:
-	    case Column::GENERATED:
-	      where = col_pos;
-	      break;
-	    case Column::JSONB:
-	      if (rand_int(1000) < 50)
-	        where = col_pos;
-	      break;
-	    case Column::JSON:
-	      break;
-	    case Column::XML:
-	    case Column::TSVECTOR:
-	    case Column::TSQUERY:
-	    case Column::POINT:
-	    case Column::LINE:
-	    case Column::LSEG:
-	    case Column::BOX:
-	    case Column::PATH:
-	    case Column::POLYGON:
-	    case Column::CIRCLE:
-	    case Column::INTARRAY:
-	    case Column::BIGINTARRAY:
-	    case Column::NUMERICARRAY:
-	    case Column::TEXTARRAY:
-	    case Column::BOOLARRAY:
-	    case Column::TIMESTAMPARRAY:
-	    case Column::INT4RANGE:
-	    case Column::INT8RANGE:
-	    case Column::NUMRANGE:
-	    case Column::TSRANGE:
-	    case Column::TSTZRANGE:
-	    case Column::DATERANGE:
-	      break;
-    case Column::INTEGER:
-      if (rand_int(1000) < 10)
-        where = col_pos;
-      break;
-    case Column::COLUMN_MAX:
-      break;
-    }
+  auto where = pick_random_where_column(this, false);
+  if (where < 0) {
+    table_mutex.unlock();
+    return;
   }
   std::string sql = "SELECT * FROM " + name_;
 
@@ -4628,84 +5009,16 @@ void Table::SelectRandomRow(Thd1 *thd) {
 /* update random row */
 void Table::UpdateRandomROW(Thd1 *thd) {
   table_mutex.lock();
-  int set;
-  while (true) {
-    set = rand_int(columns_->size() - 1);
-    if (columns_->at(set)->type_ != Column::GENERATED)
-      break;
+  int set = pick_random_updatable_column(this);
+  if (set < 0) {
+    table_mutex.unlock();
+    return;
   }
 
-  auto where = -1;
-  while (where < 0) {
-    auto col_pos = rand_int(columns_->size() - 1);
-    switch (columns_->at(col_pos)->type_) {
-	    case Column::BOOL:
-	      if (rand_int(1000) < 10)
-	        where = col_pos;
-	      break;
-	    case Column::SMALLINT:
-	    case Column::INT:
-	    case Column::BIGINT:
-	    case Column::NUMERIC:
-	    case Column::DATE:
-	    case Column::TIME:
-	    case Column::TIMETZ:
-	    case Column::TIMESTAMP:
-	    case Column::TIMESTAMPTZ:
-	    case Column::INTERVAL:
-	    case Column::BIT:
-	    case Column::VARBIT:
-	    case Column::INET:
-	    case Column::CIDR:
-	    case Column::MACADDR:
-	    case Column::MACADDR8:
-	    case Column::MONEY:
-	    case Column::FLOAT:
-	    case Column::DOUBLE:
-	    case Column::VARCHAR:
-	    case Column::CHAR:
-	    case Column::BLOB:
-	    case Column::BYTEA:
-	    case Column::UUID:
-	    case Column::GENERATED:
-	      where = col_pos;
-	      break;
-	    case Column::JSONB:
-	      if (rand_int(1000) < 50)
-	        where = col_pos;
-	      break;
-	    case Column::JSON:
-	      break;
-	    case Column::XML:
-	    case Column::TSVECTOR:
-	    case Column::TSQUERY:
-	    case Column::POINT:
-	    case Column::LINE:
-	    case Column::LSEG:
-	    case Column::BOX:
-	    case Column::PATH:
-	    case Column::POLYGON:
-	    case Column::CIRCLE:
-	    case Column::INTARRAY:
-	    case Column::BIGINTARRAY:
-	    case Column::NUMERICARRAY:
-	    case Column::TEXTARRAY:
-	    case Column::BOOLARRAY:
-	    case Column::TIMESTAMPARRAY:
-	    case Column::INT4RANGE:
-	    case Column::INT8RANGE:
-	    case Column::NUMRANGE:
-	    case Column::TSRANGE:
-	    case Column::TSTZRANGE:
-	    case Column::DATERANGE:
-	      break;
-    case Column::INTEGER:
-      if (rand_int(1000) < 10)
-        where = col_pos;
-      break;
-    case Column::COLUMN_MAX:
-      break;
-    }
+  auto where = pick_random_where_column(this, true);
+  if (where < 0) {
+    table_mutex.unlock();
+    return;
   }
   std::string sql = "UPDATE " + name_;
 
@@ -4720,14 +5033,6 @@ void Table::UpdateRandomROW(Thd1 *thd) {
                 ? random_unique_value_expr(columns_->at(set))
           : columns_->at(set)->rand_value();
   sql += " SET " + columns_->at(set)->name_ + " = " + set_value + " WHERE ";
-
-  /* if tables has pkey try to use that in where clause for 50% cases */
-  for (size_t i = 0; i < columns_->size(); i++) {
-    if (columns_->at(i)->primary_key && rand_int(100) <= 50) {
-      where = i;
-      break;
-    }
-  }
   std::string predicate;
   if (!build_hit_oriented_where(this, predicate)) {
     auto prob = rand_int(100);
@@ -5462,8 +5767,17 @@ bool Thd1::run_some_query() {
 
   int trx_left = 0;
   int current_save_point = 0;
+  std::vector<Table *> trx_ddl_tables;
   while (std::chrono::system_clock::now() < end) {
-
+    if (trx_left == 0 && transactional_ddl_enabled() &&
+        rand_int(1000) < options->at(Option::TRX_DDL_PROB_K)->getInt()) {
+      std::lock_guard<std::mutex> ddl_guard(ddl_workload_mutex);
+      run_transactional_ddl_block(this, trx_ddl_tables);
+      if (run_query_failed) {
+        break;
+      }
+      continue;
+    }
 
     /* check if we need to make sql as part of existing or new trx */
     if (trx_left > 0) {
@@ -5508,6 +5822,11 @@ bool Thd1::run_some_query() {
       execute_sql("COMMIT", this);
       trx_left = 0;
       current_save_point = 0;
+    }
+
+    std::unique_lock<std::mutex> ddl_guard;
+    if (ddl_query) {
+      ddl_guard = std::unique_lock<std::mutex>(ddl_workload_mutex);
     }
 
     switch (option) {
@@ -5597,6 +5916,17 @@ bool Thd1::run_some_query() {
     if (opt_feq[i][0] > 0)
       thread_log << options->at(i)->help << ", total=>" << opt_feq[i][0]
                  << ", success=> " << opt_feq[i][1] << std::endl;
+  }
+
+  if (!trx_ddl_tables.empty()) {
+    std::lock_guard<std::mutex> ddl_guard(ddl_workload_mutex);
+    ddl_query = true;
+    for (auto *table : trx_ddl_tables) {
+      execute_sql("DROP TABLE IF EXISTS " + table->name_, this);
+      delete table;
+    }
+    trx_ddl_tables.clear();
+    ddl_query = false;
   }
 
   /* cleanup session temporary tables tables */

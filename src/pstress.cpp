@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 
 #include "common.hpp"
@@ -18,9 +19,9 @@
 #include "random_test.hpp"
 #include <INIReader.hpp>
 #include <libpq-fe.h>
-#include <thread>
-#include <string>
 #include <libgen.h> //dirname() uses this
+#include <string>
+#include <thread>
 
 static std::vector<std::string> normalize_legacy_option_aliases(int argc,
                                                                 char *argv[]) {
@@ -48,6 +49,7 @@ static std::vector<std::string> normalize_legacy_option_aliases(int argc,
 }
 
 /* Global variable to hold pstress build directory path */
+static std::string binary_fullpath_storage;
 const char *binary_fullpath;
 
 void read_section_settings(struct workerParams *wParams, std::string secName,
@@ -81,8 +83,12 @@ void create_worker(struct workerParams *Params) {
 int main(int argc, char *argv[]) {
 
   /* Fetching the directory path where the executable is present */
-  std::unique_ptr<char> ptr(realpath(argv[0], nullptr));
-  binary_fullpath = dirname(ptr.get());
+  std::unique_ptr<char, decltype(&free)> ptr(realpath(argv[0], nullptr), &free);
+  if (ptr != nullptr)
+    binary_fullpath_storage = dirname(ptr.get());
+  else
+    binary_fullpath_storage = ".";
+  binary_fullpath = binary_fullpath_storage.c_str();
 
   std::vector<std::thread> nodes;
   std::ios_base::sync_with_stdio(false);
@@ -103,7 +109,6 @@ int main(int argc, char *argv[]) {
                          long_options, &option_index);
     if (c == -1) {
       break;
-      exit(EXIT_FAILURE);
     }
 
     switch (c) {
@@ -113,11 +118,9 @@ int main(int argc, char *argv[]) {
     case 'C':
       show_cli_help();
       exit(EXIT_FAILURE);
-      break;
     case Option::INVALID_OPTION:
       std::cout << "Invalid option , exiting" << std::endl;
       exit(EXIT_FAILURE);
-      break;
     default:
       if (c >= Option::MAX) {
         break;
