@@ -6,6 +6,7 @@
 #include "random_test.hpp"
 #include "common.hpp"
 #include "node.hpp"
+#include <array>
 #include <iomanip>
 #include <regex>
 #include <sstream>
@@ -1076,6 +1077,7 @@ int sum_of_all_options(Thd1 *thd) {
   if (options->at(Option::NO_SELECT)->getBool()) {
     options->at(Option::SELECT_ALL_ROW)->setInt(0);
     options->at(Option::SELECT_ROW_USING_PKEY)->setInt(0);
+    options->at(Option::SELECT_WITH_JOIN)->setInt(0);
   }
   /* if delete is set as zero, disable all type of deletes */
   if (options->at(Option::NO_DELETE)->getBool()) {
@@ -3150,6 +3152,297 @@ static bool build_hit_oriented_where(Table *table, std::string &predicate) {
 
   predicate = column->name_ + " = " + value_expr;
   return true;
+}
+
+static bool build_aliased_hit_oriented_where(Table *table,
+                                             const std::string &alias,
+                                             std::string &predicate) {
+  if (!use_hit_oriented_where()) {
+    return false;
+  }
+
+  auto *column = pick_hit_where_column(table);
+  if (column == nullptr) {
+    return false;
+  }
+
+  auto value_expr = cached_hit_value(table, column);
+  if (value_expr.empty()) {
+    return false;
+  }
+
+  predicate = alias + "." + column->name_ + " = " + value_expr;
+  return true;
+}
+
+static bool join_select_column(const Column *column) {
+  if (column == nullptr || column->type_ == Column::GENERATED) {
+    return false;
+  }
+
+  switch (column->type_) {
+  case Column::SMALLINT:
+  case Column::INTEGER:
+  case Column::INT:
+  case Column::BIGINT:
+  case Column::NUMERIC:
+  case Column::CHAR:
+  case Column::VARCHAR:
+  case Column::DATE:
+  case Column::TIME:
+  case Column::TIMETZ:
+  case Column::TIMESTAMP:
+  case Column::TIMESTAMPTZ:
+  case Column::UUID:
+    return true;
+  case Column::BOOL:
+  case Column::FLOAT:
+  case Column::DOUBLE:
+  case Column::INTERVAL:
+  case Column::BIT:
+  case Column::VARBIT:
+  case Column::INET:
+  case Column::CIDR:
+  case Column::MACADDR:
+  case Column::MACADDR8:
+  case Column::MONEY:
+  case Column::XML:
+  case Column::TSVECTOR:
+  case Column::TSQUERY:
+  case Column::POINT:
+  case Column::LINE:
+  case Column::LSEG:
+  case Column::BOX:
+  case Column::PATH:
+  case Column::POLYGON:
+  case Column::CIRCLE:
+  case Column::INTARRAY:
+  case Column::BIGINTARRAY:
+  case Column::NUMERICARRAY:
+  case Column::TEXTARRAY:
+  case Column::BOOLARRAY:
+  case Column::TIMESTAMPARRAY:
+  case Column::INT4RANGE:
+  case Column::INT8RANGE:
+  case Column::NUMRANGE:
+  case Column::TSRANGE:
+  case Column::TSTZRANGE:
+  case Column::DATERANGE:
+  case Column::BYTEA:
+  case Column::BLOB:
+  case Column::JSON:
+  case Column::JSONB:
+  case Column::GENERATED:
+  case Column::COLUMN_MAX:
+    return false;
+  }
+
+  return false;
+}
+
+static bool join_compatible_columns(const Column *left, const Column *right) {
+  return left != nullptr && right != nullptr && left->type_ == right->type_ &&
+         join_select_column(left) && join_select_column(right);
+}
+
+struct JoinSelectTarget {
+  Table *left_table = nullptr;
+  Table *right_table = nullptr;
+  Column *left_column = nullptr;
+  Column *right_column = nullptr;
+};
+
+static bool sample_join_target_from_fk(std::vector<Table *> *all_tables,
+                                       JoinSelectTarget &target) {
+  if (all_tables == nullptr) {
+    return false;
+  }
+
+  size_t candidates_seen = 0;
+  for (auto *table : *all_tables) {
+    if (table == nullptr || table->type != Table::FK) {
+      continue;
+    }
+
+    auto *fk_table = static_cast<FK_table *>(table);
+    if (fk_table->parent == nullptr || fk_table->child_key == nullptr ||
+        fk_table->parent_key == nullptr ||
+        !join_compatible_columns(fk_table->child_key, fk_table->parent_key)) {
+      continue;
+    }
+
+    candidates_seen++;
+    if (candidates_seen == 1 ||
+        rand_int(static_cast<int>(candidates_seen - 1), 0) == 0) {
+      target.left_table = table;
+      target.right_table = fk_table->parent;
+      target.left_column = fk_table->child_key;
+      target.right_column = fk_table->parent_key;
+    }
+  }
+
+  return candidates_seen > 0;
+}
+
+static bool sample_join_target_from_table_pairs(std::vector<Table *> *all_tables,
+                                                JoinSelectTarget &target) {
+  if (all_tables == nullptr || all_tables->empty()) {
+    return false;
+  }
+
+  size_t candidates_seen = 0;
+  for (size_t left_index = 0; left_index < all_tables->size(); ++left_index) {
+    auto *left_table = all_tables->at(left_index);
+    if (left_table == nullptr) {
+      continue;
+    }
+
+    for (size_t right_index = left_index + 1; right_index < all_tables->size();
+         ++right_index) {
+      auto *right_table = all_tables->at(right_index);
+      if (right_table == nullptr) {
+        continue;
+      }
+
+      std::scoped_lock lock(left_table->table_mutex, right_table->table_mutex);
+      std::array<std::vector<Column *>, Column::COLUMN_MAX> left_columns;
+      std::array<std::vector<Column *>, Column::COLUMN_MAX> right_columns;
+      std::vector<Column::COLUMN_TYPES> common_types;
+
+      for (auto *column : *left_table->columns_) {
+        if (join_select_column(column)) {
+          left_columns[column->type_].push_back(column);
+        }
+      }
+      for (auto *column : *right_table->columns_) {
+        if (join_select_column(column)) {
+          right_columns[column->type_].push_back(column);
+        }
+      }
+
+      for (size_t type = 0; type < Column::COLUMN_MAX; ++type) {
+        if (!left_columns[type].empty() && !right_columns[type].empty()) {
+          common_types.push_back(static_cast<Column::COLUMN_TYPES>(type));
+        }
+      }
+
+      if (common_types.empty()) {
+        continue;
+      }
+
+      auto selected_type =
+          common_types.at(rand_int(common_types.size() - 1, 0));
+      auto *left_column =
+          left_columns[selected_type].at(rand_int(left_columns[selected_type].size() - 1, 0));
+      auto *right_column = right_columns[selected_type].at(
+          rand_int(right_columns[selected_type].size() - 1, 0));
+
+      candidates_seen++;
+      if (candidates_seen == 1 ||
+          rand_int(static_cast<int>(candidates_seen - 1), 0) == 0) {
+        target.left_table = left_table;
+        target.right_table = right_table;
+        target.left_column = left_column;
+        target.right_column = right_column;
+      }
+    }
+  }
+
+  return candidates_seen > 0;
+}
+
+static bool sample_self_join_target(std::vector<Table *> *all_tables,
+                                    JoinSelectTarget &target) {
+  if (all_tables == nullptr || all_tables->empty()) {
+    return false;
+  }
+
+  size_t candidates_seen = 0;
+  for (auto *table : *all_tables) {
+    if (table == nullptr) {
+      continue;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(table->table_mutex);
+    std::array<std::vector<Column *>, Column::COLUMN_MAX> columns_by_type;
+    std::vector<Column::COLUMN_TYPES> joinable_types;
+
+    for (auto *column : *table->columns_) {
+      if (join_select_column(column)) {
+        columns_by_type[column->type_].push_back(column);
+      }
+    }
+
+    for (size_t type = 0; type < Column::COLUMN_MAX; ++type) {
+      if (!columns_by_type[type].empty()) {
+        joinable_types.push_back(static_cast<Column::COLUMN_TYPES>(type));
+      }
+    }
+
+    if (joinable_types.empty()) {
+      continue;
+    }
+
+    auto selected_type =
+        joinable_types.at(rand_int(joinable_types.size() - 1, 0));
+    auto &columns = columns_by_type[selected_type];
+    auto *left_column = columns.at(rand_int(columns.size() - 1, 0));
+    auto *right_column = columns.at(rand_int(columns.size() - 1, 0));
+    if (columns.size() > 1 && left_column == right_column) {
+      size_t right_position = rand_int(columns.size() - 2, 0);
+      if (columns.at(right_position) == left_column) {
+        right_position = columns.size() - 1;
+      }
+      right_column = columns.at(right_position);
+    }
+
+    candidates_seen++;
+    if (candidates_seen == 1 ||
+        rand_int(static_cast<int>(candidates_seen - 1), 0) == 0) {
+      target.left_table = table;
+      target.right_table = table;
+      target.left_column = left_column;
+      target.right_column = right_column;
+    }
+  }
+
+  return candidates_seen > 0;
+}
+
+static bool pick_join_select_target(std::vector<Table *> *all_tables,
+                                    JoinSelectTarget &target) {
+  if (sample_join_target_from_fk(all_tables, target)) {
+    return true;
+  }
+  if (sample_join_target_from_table_pairs(all_tables, target)) {
+    return true;
+  }
+  return sample_self_join_target(all_tables, target);
+}
+
+static void select_with_join(std::vector<Table *> *all_tables, Thd1 *thd) {
+  JoinSelectTarget target;
+  if (!pick_join_select_target(all_tables, target) ||
+      target.left_table == nullptr || target.right_table == nullptr ||
+      target.left_column == nullptr || target.right_column == nullptr) {
+    return;
+  }
+
+  std::string sql = "SELECT * FROM " + target.left_table->name_ +
+                    " T1 INNER JOIN " + target.right_table->name_ +
+                    " T2 ON T1." + target.left_column->name_ + " = T2." +
+                    target.right_column->name_;
+
+  std::string predicate;
+  if (!build_aliased_hit_oriented_where(target.left_table, "T1", predicate)) {
+    build_aliased_hit_oriented_where(target.right_table, "T2", predicate);
+  }
+  if (!predicate.empty()) {
+    sql += " WHERE " + predicate;
+  }
+
+  sql += " LIMIT 100";
+  execute_sql(sql, thd);
 }
 
 static int pick_random_updatable_column(const Table *table) {
@@ -5856,6 +6149,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::SELECT_ROW_USING_PKEY:
       table->SelectRandomRow(this);
+      break;
+    case Option::SELECT_WITH_JOIN:
+      select_with_join(all_session_tables, this);
       break;
     case Option::INSERT_RANDOM_ROW:
       table->InsertRandomRow(this);

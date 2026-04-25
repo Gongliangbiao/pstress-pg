@@ -246,6 +246,12 @@ void add_options() {
   opt->setInt(800);
   opt->setSQL();
 
+  opt = newOption(Option::INT, Option::SELECT_WITH_JOIN, "select-with-join");
+  opt->help =
+      "Select rows using metadata-driven INNER JOIN between compatible tables";
+  opt->setInt(40);
+  opt->setSQL();
+
   /* Insert random row */
   opt = newOption(Option::INT, Option::INSERT_RANDOM_ROW, "insert-row");
   opt->help = "insert random row";

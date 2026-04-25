@@ -589,3 +589,55 @@
 ### Validation
 
 - Not run in this iteration, per request.
+
+## 2026-04-25 - Iteration 14: metadata-driven JOIN query path
+
+### Scope
+
+- Added a dedicated SQL workload option `--select-with-join` for
+  metadata-driven PostgreSQL `INNER JOIN` queries.
+- Wired `--select-with-join` into the main random-query dispatcher instead of
+  relying only on the older `grammar.sql` template path.
+- Kept the first version intentionally narrow:
+  - read-only `SELECT ... INNER JOIN ...`
+  - two-table joins only
+  - same-type scalar join keys only
+  - no new metadata object type
+- Made the new join path prefer existing FK relationships when available:
+  child key joins back to parent key first, then falls back to general
+  same-type scalar joins across tables, then self-join as a last resort.
+- Added optional hit-oriented aliased predicates on top of the join so the new
+  path can reuse the existing real-value cache when suitable.
+- Added `--select-with-join` to `--no-select` disabling behavior and documented
+  it in [README.md](/Users/gongliangbiao/Desktop/Codes/pstress/README.md).
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Red baseline before implementation:
+  `--grammar-sql=0 --select-with-join=500` failed immediately with
+  `unrecognized option '--select-with-join=500'`
+- Green baseline after implementation:
+  `--grammar-sql=0 --select-with-join=500 --no-ddl --no-insert --no-update --no-delete --select-all-rows=0 --select-single-row=0`
+- Green baseline result: completed with exit code `0`
+- Green baseline produced dedicated join SQL even with `grammar-sql=0`; sample:
+  `SELECT * FROM tt_1_fk T1 INNER JOIN tt_1 T2 ON T1.ifk_col = T2.i3 ...`
+- 30-second smoke:
+  `--threads=1 --seconds=30 --grammar-sql=0 --select-with-join=120`
+- Smoke result: completed with exit code `0`
+- Smoke summary: `241/152238` failed, `99.84%` successful
+- Smoke observed `INNER JOIN` count in thread SQL log: `9365`
+- Smoke remaining error codes were existing workload classes, led by:
+  - `23505`: duplicate unique/primary values
+  - `23503`: FK conflicts
+- 3-minute validation:
+  `--threads=2 --seconds=180 --grammar-sql=0 --select-with-join=120`
+- 3-minute result: completed with exit code `0`
+- 3-minute summary: `343/393162` failed, `99.91%` successful
+- 3-minute observed `INNER JOIN` count across thread SQL logs: `24233`
+- 3-minute remaining error codes:
+  - `23505`: duplicate unique/primary values
+  - `23503`: FK conflicts
+  - `25P02`: current transaction aborted in legacy random transaction flow
+- No new join-specific structural failures such as missing relation/column
+  errors were observed in the 3-minute validation run.
