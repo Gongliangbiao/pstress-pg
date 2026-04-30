@@ -698,3 +698,149 @@
   - `25P02`: current transaction aborted in legacy random transaction flow
 - No new CTE-specific structural failures such as syntax errors or missing
   relation/column errors were observed in the 3-minute validation run.
+
+## 2026-04-30 - Iteration 16: high-table-count partition stability fixes
+
+### Scope
+
+- Reproduced the user-reported fast-exit bug with a larger initial-load shape:
+  `--tables=200 --records=500`.
+- Kept the fix intentionally narrow and limited the code change to the
+  partition key value-generation and update-column selection paths in
+  [src/random_test.cpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/random_test.cpp).
+
+### Root Cause
+
+- Initial-load fast exit was not caused by table count alone; it was triggered
+  by PostgreSQL partition constraint failures during partition-table inserts.
+- Two concrete issues were involved:
+  - `LIST` partition tables generated invalid `ip_col` values during bulk load
+    and runtime insert. In some cases the code used an arbitrary random integer;
+    in other cases it emitted `DEFAULT` for an identity-backed partition key,
+    which let PostgreSQL generate values such as `1` that were not present in
+    any `FOR VALUES IN (...)` partition set.
+  - Runtime `UPDATE` statements treated the partition key column as a normal
+    mutable column. Because the workload sometimes targets a partition child
+    directly, random updates to `ip_col` produced `23514` errors such as
+    `new row for relation ... violates partition constraint`.
+
+### Fix
+
+- Added a small helper that detects the `LIST` partition key column and returns
+  a value chosen from the table's real in-memory partition value lists instead
+  of generating a generic random integer.
+- Reused that helper in both:
+  - bulk initial load (`InsertBulkRecord`)
+  - runtime insert (`InsertRandomRow`)
+- Ensured the `LIST` partition key no longer falls back to `DEFAULT` identity
+  generation during inserts.
+- Excluded the partition key column from random update candidates for partition
+  tables so the workload no longer rewrites `ip_col` into values that violate
+  root or child partition constraints.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Reproduction before fix:
+  `--tables=200 --threads=2 --seconds=30 --records=500`
+- Pre-fix symptom:
+  - fast exit during initial load
+  - `Bulk insert failed for table ...`
+  - `Thread 0 failed` / `Thread 1 failed`
+  - `23514: no partition of relation ... found for row`
+- 30-second regression validation after fix:
+  `--tables=200 --threads=2 --seconds=30 --records=500`
+- 30-second result: completed with exit code `0`
+- 30-second summary: `728/375719` failed, `99.81%` successful
+- 30-second structural check:
+  - no `Thread N failed`
+  - no `some other thread failed`
+  - no `23514`
+  - no `54000`
+  - no `54011`
+- 3-minute regression validation after fix:
+  `--tables=200 --threads=2 --seconds=180 --records=500`
+- 3-minute result: completed with exit code `0`
+- 3-minute summary: `2174/1627744` failed, `99.87%` successful
+- 3-minute remaining error codes:
+  - `23505`: `1189`
+  - `23503`: `965`
+  - `25P02`: `20`
+- 3-minute structural check:
+  - no `23514`
+  - no `54000`
+  - no `54011`
+  - no thread-failure fast exit
+
+## 2026-04-30 - Iteration 17: five-round high-scale stability rerun
+
+### Scope
+
+- Re-ran the large initial-load scenario five more times with the same base
+  workload shape used in Iteration 16:
+  `--tables=200 --threads=2 --seconds=180 --records=500`
+- Split the verification into two buckets:
+  - 2 rounds with `--no-partition-tables`
+  - 3 rounds with partition tables enabled
+- Goal: confirm the previous fix was stable across repeated runs and verify
+  whether any remaining fast-exit behavior was specific to partition tables.
+
+### Validation
+
+- Round `no_partition_1`
+  - options: `--no-partition-tables`
+  - result: completed with exit code `0`
+  - summary: `3613/2112576` failed, `99.83%` successful
+  - remaining error codes:
+    - `23505`: `2069`
+    - `23503`: `1473`
+    - `25P02`: `71`
+  - structural check: clean
+- Round `no_partition_2`
+  - options: `--no-partition-tables`
+  - result: completed with exit code `0`
+  - summary: `3335/1898840` failed, `99.82%` successful
+  - remaining error codes:
+    - `23505`: `1954`
+    - `23503`: `1333`
+    - `25P02`: `48`
+  - structural check: clean
+- Round `partition_1`
+  - options: default partition behavior
+  - result: completed with exit code `0`
+  - summary: `2051/1448578` failed, `99.86%` successful
+  - remaining error codes:
+    - `23505`: `1032`
+    - `23503`: `1007`
+    - `25P02`: `12`
+  - structural check: clean
+- Round `partition_2`
+  - options: default partition behavior
+  - result: completed with exit code `0`
+  - summary: `2122/1468685` failed, `99.86%` successful
+  - remaining error codes:
+    - `23505`: `1102`
+    - `23503`: `976`
+    - `25P02`: `44`
+  - structural check: clean
+- Round `partition_3`
+  - options: default partition behavior
+  - result: completed with exit code `0`
+  - summary: `1962/1428970` failed, `99.86%` successful
+  - remaining error codes:
+    - `23503`: `979`
+    - `23505`: `970`
+    - `25P02`: `13`
+  - structural check: clean
+
+### Conclusion
+
+- All 5 repeated 3-minute runs completed successfully.
+- Neither the no-partition runs nor the partition-enabled runs reproduced the
+  previous fast-exit behavior.
+- Across all 5 rounds, no structural failures were observed:
+  - no `23514`
+  - no `54000`
+  - no `54011`
+  - no `Thread N failed`
+  - no `some other thread failed`

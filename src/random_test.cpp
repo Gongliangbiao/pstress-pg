@@ -90,6 +90,39 @@ static std::string pg_partition_target(Table *table) {
       table, "p" + std::to_string(rand_int(part->number_of_part - 1)));
 }
 
+static bool is_list_partition_key_column(const Table *table,
+                                         const Column *column) {
+  if (table->type != Table::PARTITION || table->columns_->empty()) {
+    return false;
+  }
+
+  auto *part = static_cast<const Partition *>(table);
+  return part->part_type == Partition::LIST &&
+         table->columns_->front() == column;
+}
+
+static bool list_partition_key_value_expr(Table *table, Column *column,
+                                          std::string &value_expr) {
+  if (!is_list_partition_key_column(table, column)) {
+    return false;
+  }
+
+  auto *part = static_cast<Partition *>(table);
+  if (part->lists.empty()) {
+    return false;
+  }
+
+  const auto &partition_values =
+      part->lists.at(rand_int(part->lists.size() - 1)).list;
+  if (partition_values.empty()) {
+    return false;
+  }
+
+  value_expr =
+      std::to_string(partition_values.at(rand_int(partition_values.size() - 1)));
+  return true;
+}
+
 static bool supports_like_predicate(const Column *column) {
   if (column->type_ == Column::GENERATED) {
     auto generated =
@@ -3548,6 +3581,9 @@ static void select_with_cte(std::vector<Table *> *all_tables, Thd1 *thd) {
 static int pick_random_updatable_column(const Table *table) {
   std::vector<int> candidates;
   for (size_t i = 0; i < table->columns_->size(); ++i) {
+    if (table->type == Table::PARTITION && i == 0) {
+      continue;
+    }
     if (table->columns_->at(i)->type_ != Column::GENERATED) {
       candidates.push_back(static_cast<int>(i));
     }
@@ -5424,8 +5460,6 @@ void Table::UpdateRandomROW(Thd1 *thd) {
 }
 
 bool Table::InsertBulkRecord(Thd1 *thd) {
-  bool is_list_partition = false;
-
   // if parent has no records, child can't have records
   if (type == FK) {
     if (static_cast<FK_table *>(this)->parent->number_of_initial_records == 0)
@@ -5439,12 +5473,6 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
 
   if (has_pk()) {
     thd->unique_keys = generateUniqueRandomNumbers(number_of_initial_records);
-  }
-
-  /* ignore error in the case parition list  */
-  if (type == PARTITION &&
-      static_cast<Partition *>(this)->part_type == Partition::LIST) {
-    is_list_partition = true;
   }
 
   prepare_sql += "INTO " + name_ + " (";
@@ -5478,14 +5506,9 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
         value_expr = std::to_string(thd->unique_keys.at(records));
       } else if (column->referenced_key) {
         value_expr = deterministic_unique_value(column, records);
+      } else if (list_partition_key_value_expr(this, column, value_expr)) {
       } else if (column->auto_increment == true) {
         value_expr = "DEFAULT";
-      } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
-        /* for list partition we insert only maximum possible value
-         * todo modify rand_value to return list parititon range */
-        value_expr = std::to_string(
-            rand_int(maximum_records_in_each_parititon_list *
-                     options->at(Option::MAX_PARTITIONS)->getInt()));
       } else {
         value_expr = column->rand_value();
       }
@@ -5534,6 +5557,7 @@ void Table::InsertRandomRow(Thd1 *thd) {
     column_names.push_back(column->name_);
     value_columns.push_back(column);
     std::string val;
+    bool used_list_partition_key = false;
     if (type == TABLE_TYPES::FK &&
         static_cast<FK_table *>(this)->child_key == column)
       val = fk_reference_value_expr(this);
@@ -5541,9 +5565,13 @@ void Table::InsertRandomRow(Thd1 *thd) {
       val = "default";
     else if (column->referenced_key)
       val = random_unique_value_expr(column);
-    else
-      val = column->rand_value();
-    if (column->auto_increment == true && rand_int(100) < 10)
+    else {
+      used_list_partition_key = list_partition_key_value_expr(this, column, val);
+      if (!used_list_partition_key)
+        val = column->rand_value();
+    }
+    if (column->auto_increment == true && !used_list_partition_key &&
+        rand_int(100) < 10)
       val = "DEFAULT";
     vals += " " + val + ",";
     value_exprs.push_back(val);
