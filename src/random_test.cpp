@@ -5911,17 +5911,36 @@ static std::string load_metadata_from_file() {
           type.compare("INTEGER") == 0 || type.compare("TIMESTAMP") == 0 ||
           type.compare("TIMESTAMP WITH TIME ZONE") == 0 ||
           type.compare("TIMESTAMPTZ") == 0 || type.compare("DATE") == 0 ||
-          type.compare("TIME") == 0 || type.compare("TIME WITH TIME ZONE") == 0 ||
+          type.compare("TIME") == 0 ||
+          type.compare("TIME WITHOUT TIME ZONE") == 0 ||
+          type.compare("TIME WITH TIME ZONE") == 0 ||
           type.compare("TIMETZ") == 0 || type.compare("INTERVAL") == 0 ||
           type.compare("SMALLINT") == 0 || type.compare("BIGINT") == 0 ||
-          type.compare("NUMERIC") == 0 || type.compare("BIT") == 0 ||
+          type.compare("DECIMAL") == 0 || type.compare("NUMERIC") == 0 ||
+          type.compare("BIT") == 0 ||
           type.compare("BIT VARYING") == 0 || type.compare("VARBIT") == 0 ||
           type.compare("INET") == 0 || type.compare("CIDR") == 0 ||
           type.compare("MACADDR") == 0 || type.compare("MACADDR8") == 0 ||
           type.compare("MONEY") == 0 || type.compare("XML") == 0 ||
+          type.compare("POINT") == 0 || type.compare("LINE") == 0 ||
+          type.compare("LSEG") == 0 || type.compare("BOX") == 0 ||
+          type.compare("PATH") == 0 || type.compare("POLYGON") == 0 ||
+          type.compare("CIRCLE") == 0 ||
           type.compare("TSVECTOR") == 0 || type.compare("TSQUERY") == 0 ||
           type.compare("BYTEA") == 0 || type.compare("UUID") == 0 ||
-          type.compare("JSON") == 0 || type.compare("JSONB") == 0) {
+          type.compare("JSON") == 0 || type.compare("JSONB") == 0 ||
+          type.compare("INT[]") == 0 || type.compare("INTEGER[]") == 0 ||
+          type.compare("BIGINT[]") == 0 ||
+          type.compare("NUMERIC[]") == 0 || type.compare("TEXT[]") == 0 ||
+          type.compare("BOOLEAN[]") == 0 || type.compare("BOOL[]") == 0 ||
+          type.compare("TIMESTAMP WITHOUT TIME ZONE") == 0 ||
+          type.compare("TIMESTAMP[]") == 0 ||
+          type.compare("INT4RANGE") == 0 ||
+          type.compare("INT8RANGE") == 0 ||
+          type.compare("NUMRANGE") == 0 ||
+          type.compare("TSRANGE") == 0 ||
+          type.compare("TSTZRANGE") == 0 ||
+          type.compare("DATERANGE") == 0) {
         a = new Column(col["name"].GetString(), type, table);
       } else if (type.compare("GENERATED") == 0) {
         auto name = col["name"].GetString();

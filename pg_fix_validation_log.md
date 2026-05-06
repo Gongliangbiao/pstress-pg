@@ -911,3 +911,73 @@
   - no `23514`
   - no `54000`
   - no `54011`
+
+## 2026-05-06 - Iteration 19: prepare plus step 2 metadata replay
+
+### Scope
+
+- Verified the dedicated prepare flow instead of only running direct workload:
+  1. run once with `--prepare` to create data and save metadata
+  2. run again with `--step=2` to load metadata and continue execution
+- Used the same high-scale shape as the recent regression:
+  `--tables=100 --columns=30 --records=1000 --threads=100`
+- Kept the fix intentionally minimal and limited it to metadata
+  deserialization in
+  [src/random_test.cpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/random_test.cpp).
+
+### Root Cause
+
+- `--prepare` itself completed successfully and produced:
+  `/tmp/pstress-prepare-step2/step_1.dll`
+- The follow-up run with `--step=2` aborted immediately with:
+  `libc++abi: terminating due to uncaught exception of type std::runtime_error: unhandled column type`
+- The metadata writer already persisted newly added PostgreSQL-specific column
+  types such as:
+  - geometry types: `POINT`, `LINE`, `LSEG`, `BOX`, `PATH`, `POLYGON`,
+    `CIRCLE`
+  - array types: `INT[]`, `BIGINT[]`, `NUMERIC[]`, `TEXT[]`, `BOOLEAN[]`,
+    `TIMESTAMP[]`
+  - range types: `INT4RANGE`, `INT8RANGE`, `NUMRANGE`, `TSRANGE`,
+    `TSTZRANGE`, `DATERANGE`
+- `Column::col_type()` already supports these strings, but
+  `load_metadata_from_file()` still had an older whitelist and rejected them
+  before a `Column` object could be reconstructed.
+
+### Fix
+
+- Extended the metadata loader whitelist to accept the PostgreSQL types that
+  were already valid elsewhere in the codebase:
+  - geometry family
+  - array family
+  - range family
+  - a few safe aliases already supported by `Column::col_type()`, such as
+    `DECIMAL`, `TIME WITHOUT TIME ZONE`, and
+    `TIMESTAMP WITHOUT TIME ZONE`
+- The fix does not change random generation, persistence format, or execution
+  behavior. It only makes `step=2+` able to read metadata files that the tool
+  can already write.
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Prepare command:
+  `--tables=100 --columns=30 --records=1000 --threads=100 --prepare`
+- Prepare result:
+  - saved `/tmp/pstress-prepare-step2/step_1.dll`
+  - summary: `0/5657` failed, `100.00%` successful
+- Step 2 command:
+  `--tables=100 --columns=30 --records=1000 --threads=100 --seconds=30 --step=2`
+- Step 2 observed milestones:
+  - printed `metadata loaded from /tmp/pstress-prepare-step2/step_1.dll`
+  - reached `Starting random load in 100 threads.`
+  - saved `/tmp/pstress-prepare-step2/step_2.dll`
+  - completed with exit code `0`
+- Step 2 summary: `459/410447` failed, `99.89%` successful
+- Structural check:
+  - no `unhandled column type`
+  - no `Thread N failed`
+  - no `some other thread failed`
+  - no `22003`
+  - no `23514`
+  - no `54000`
+  - no `54011`
