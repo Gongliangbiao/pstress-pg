@@ -2593,7 +2593,9 @@ Generated_Column::Generated_Column(std::string name, Table *table)
       g_type == SMALLINT || g_type == NUMERIC) {
     std::vector<std::string> terms;
     for (auto pos : col_pos) {
-      terms.push_back(pg_generated_numeric_term(table->columns_->at(pos)));
+      terms.push_back("(" +
+                      pg_generated_numeric_term(table->columns_->at(pos)) +
+                      ")::NUMERIC");
     }
     std::string sum_expr = "(";
     for (const auto &term : terms)

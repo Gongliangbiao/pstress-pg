@@ -844,3 +844,70 @@
   - no `54011`
   - no `Thread N failed`
   - no `some other thread failed`
+
+## 2026-05-06 - Iteration 18: generated-column overflow at 30 columns
+
+### Scope
+
+- Investigated the new report that initial inserts still fail when column count
+  is increased to the `20-30` range.
+- Reproduced with the requested high-column workload shape:
+  `--tables=100 --columns=30 --records=1000 --threads=100`
+- Kept the fix intentionally small and limited it to the numeric generated
+  column expression builder in
+  [src/random_test.cpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/random_test.cpp).
+
+### Root Cause
+
+- The first real failure was:
+  `22003: smallint out of range`
+- The failure came from a temporary table bulk insert during initial load, not
+  from generic thread count pressure.
+- The affected table contained a generated numeric column whose expression
+  summed multiple source columns, including two `SMALLINT` columns.
+- PostgreSQL evaluated those integer terms in their native type domain before
+  the outer cast to `NUMERIC`, so expressions like:
+  `si5 + si1 + ROUND(d6)::INTEGER + ...`
+  could overflow at the intermediate `SMALLINT` addition step even though the
+  final generated column type was `NUMERIC`.
+
+### Fix
+
+- Wrapped each generated numeric source term with `::NUMERIC` before building
+  the additive expression.
+- This preserves the existing generated-column design while preventing
+  intermediate overflow for `SMALLINT`, `INT`, and `BIGINT` source terms.
+- The change was intentionally minimal:
+  - no change to random column distributions
+  - no change to table layout rules
+  - no change to initial-load batching
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Reproduction before fix:
+  `--tables=100 --columns=30 --records=1000 --threads=100 --step=1`
+- Pre-fix symptom:
+  - initial-load failure fan-out across many threads
+  - first real root error:
+    `22003: smallint out of range`
+  - failing statement was a bulk insert into temporary table `tt_3_t`
+  - the generated expression involved two `SMALLINT` source columns
+- Post-fix regression validation:
+  `--tables=100 --columns=30 --records=1000 --threads=100 --seconds=30`
+- Post-fix result: completed with exit code `0`
+- Post-fix observed milestone:
+  - reached `Starting random load in 100 threads.`
+  - therefore initial load completed successfully before workload execution
+- Post-fix summary: `459/339347` failed, `99.86%` successful
+- Post-fix remaining error codes:
+  - `23503`: `310`
+  - `23505`: `148`
+  - `40P01`: `1`
+- Post-fix structural check:
+  - no `22003`
+  - no `Thread N failed`
+  - no `some other thread failed`
+  - no `23514`
+  - no `54000`
+  - no `54011`
