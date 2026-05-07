@@ -981,3 +981,254 @@
   - no `23514`
   - no `54000`
   - no `54011`
+
+## 2026-05-06 - Iteration 20: direct-run AC coverage campaign
+
+### Scope
+
+- Verified only the direct `run` path.
+- Explicitly did not use the `prepare -> step=2` replay path in this campaign.
+- Used a small AC-style coverage matrix across the following axes:
+  - workload scale: small, medium, large
+  - seed: multiple fixed seeds
+  - table shape: mixed, partition-only, temp-only, no-partition
+  - workload mode: default, no-DDL, transaction-heavy, transactional-DDL-heavy
+  - query mix: default, join/CTE-heavy
+  - edge toggles: `records=0`, `--no-generated-columns`, `--no-shuffle`,
+    `--no-fk-tables`
+- All cases used direct random metadata creation followed by normal workload
+  execution in the same run.
+
+### Cases
+
+- `c01_baseline`
+  - `--seed=1 --tables=10 --columns=10 --records=100 --threads=4`
+- `c02_medium_mix`
+  - `--seed=7 --tables=40 --columns=15 --records=500 --exact-initial-records --threads=16`
+- `c03_large_mix`
+  - `--seed=19 --tables=100 --columns=30 --records=1000 --exact-initial-records --threads=100`
+- `c04_large_no_partition`
+  - `--seed=23 --tables=100 --columns=30 --records=1000 --exact-initial-records --threads=64 --no-partition-tables`
+- `c05_partition_only`
+  - `--seed=29 --tables=40 --columns=20 --records=300 --exact-initial-records --threads=16 --only-partition-tables --no-temp-tables`
+- `c06_temp_only`
+  - `--seed=31 --tables=40 --columns=20 --records=300 --exact-initial-records --threads=16 --only-temp-tables --no-partition-tables`
+- `c07_no_ddl_trx_heavy`
+  - `--seed=37 --tables=50 --columns=20 --records=500 --exact-initial-records --threads=32 --no-ddl --trx-prob-k=300 --trx-size=8 --commit-prob=100 --savepoint-prob-k=100`
+- `c08_trx_ddl_heavy`
+  - `--seed=41 --tables=30 --columns=15 --records=200 --exact-initial-records --threads=16 --trx-prob-k=0 --trx-ddl-prob-k=250 --trx-ddl-size=3 --grammar-sql=0 --no-temp-tables`
+- `c09_join_cte_heavy`
+  - `--seed=43 --tables=40 --columns=15 --records=300 --exact-initial-records --threads=16 --select-with-join=500 --select-with-cte=500`
+- `c10_zero_records`
+  - `--seed=47 --tables=40 --columns=15 --records=0 --exact-initial-records --threads=16`
+- `c11_no_generated_wide`
+  - `--seed=53 --tables=60 --columns=30 --records=500 --exact-initial-records --threads=32 --no-generated-columns`
+- `c12_no_shuffle_fk_off`
+  - `--seed=59 --tables=60 --columns=25 --records=500 --exact-initial-records --threads=32 --no-shuffle --no-fk-tables`
+
+### Results
+
+- `c01_baseline`
+  - result: PASS
+  - summary: `4646/499599` failed, `99.07%` successful
+- `c02_medium_mix`
+  - result: PASS
+  - summary: `553/461172` failed, `99.88%` successful
+- `c03_large_mix`
+  - result: PASS
+  - summary: `666/345888` failed, `99.81%` successful
+- `c04_large_no_partition`
+  - result: PASS
+  - summary: `793/454315` failed, `99.83%` successful
+- `c05_partition_only`
+  - result: PASS
+  - summary: `9/135304` failed, `99.99%` successful
+- `c06_temp_only`
+  - result: PASS
+  - summary: `696/1585388` failed, `99.96%` successful
+- `c07_no_ddl_trx_heavy`
+  - result: PASS
+  - summary: `2657/529394` failed, `99.50%` successful
+- `c08_trx_ddl_heavy`
+  - result: PASS
+  - summary: `266/227845` failed, `99.88%` successful
+- `c09_join_cte_heavy`
+  - result: PASS
+  - summary: `624/553531` failed, `99.89%` successful
+- `c10_zero_records`
+  - result: PASS
+  - summary: `32731/562652` failed, `94.18%` successful
+- `c11_no_generated_wide`
+  - result: PASS
+  - summary: `724/353675` failed, `99.80%` successful
+- `c12_no_shuffle_fk_off`
+  - result: PASS
+  - summary: `69/416080` failed, `99.98%` successful
+
+### Structural Check
+
+- All 12 cases exited with code `0`
+- All 12 cases reached `COMPLETED`
+- All 12 cases saved `step_1.dll`
+- None of the 12 cases reproduced the known structural failures:
+  - no `Thread N failed`
+  - no `some other thread failed`
+  - no `unhandled column type`
+  - no `22003`
+  - no `23514`
+  - no `54000`
+  - no `54011`
+  - no `42P10`
+  - no `42704`
+  - no `42P17`
+  - no `42883`
+  - no `42601`
+  - no `25P02`
+  - no `FATAL`
+
+### Observations
+
+- This campaign did not expose a new direct-run crash or fast-exit regression.
+- The weakest workload quality appeared in `c10_zero_records`, which still
+  completed normally but dropped to `94.18%` successful queries.
+- Spot-checking that case showed many `23505` duplicate-key failures caused by
+  repeated explicit inserts such as `ipkey = 0` into primary-key tables.
+- That is not a termination bug, but it is a useful follow-up target if the
+  goal is to improve effective DML hit/useful-write ratio in sparse-start
+  workloads.
+
+## 2026-05-06 - Iteration 21: dead MySQL-era option enums cleanup
+
+### Scope
+
+- Reviewed feedback that `Option::Opt` in
+  [src/common.hpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/common.hpp)
+  still contained MySQL-era enum values that no longer have CLI registration in
+  [src/help.cpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/help.cpp).
+- Verified before changing code whether those enum values were still referenced
+  anywhere in the PostgreSQL code path.
+
+### Findings
+
+- The review item was valid.
+- The following enum values had no CLI registration and no remaining
+  `Option::...` usage in `src/`:
+  - `NUMBER_OF_GENERAL_TABLESPACE`
+  - `NUMBER_OF_UNDO_TABLESPACE`
+  - `UNDO_SQL`
+  - `ENGINE`
+  - `NO_ENCRYPTION`
+  - `ENCRYPTION_TYPE`
+  - `NO_COLUMN_COMPRESSION`
+  - `NO_TABLE_COMPRESSION`
+  - `NO_TABLESPACE`
+  - `ALTER_TABLE_ENCRYPTION`
+  - `ALTER_DISCARD_TABLESPACE`
+  - `ALTER_ENGINE`
+  - `ALTER_TABLE_COMPRESSION`
+  - `ALTER_INSTANCE_RELOAD_KEYRING`
+  - `ROW_FORMAT`
+  - `SERVER_OPTION_FILE`
+  - `SET_GLOBAL_VARIABLE`
+  - `ALTER_MASTER_KEY`
+  - `ALTER_ENCRYPTION_KEY`
+  - `ALTER_GCACHE_MASTER_KEY`
+  - `ALTER_REDO_LOGGING`
+  - `ROTATE_REDO_LOG_KEY`
+  - `ALTER_TABLESPACE_ENCRYPTION`
+  - `ALTER_TABLESPACE_RENAME`
+  - `ALTER_DATABASE_ENCRYPTION`
+  - `MYSQLD_SERVER_OPTION`
+- The only remaining `ENGINE` hit after cleanup was SQL text in
+  `src/pquery.sql`, not an enum reference.
+
+### Fix
+
+- Removed the dead MySQL-specific enum values from `Option::Opt` in
+  [src/common.hpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/common.hpp).
+- Kept the change intentionally minimal:
+  - no runtime logic changes
+  - no CLI behavior changes
+  - no refactoring outside the enum definition
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- Result: build completed successfully
+- Residual reference check:
+  - no remaining `Option::...` references to the removed enum values in `src/`
+
+## 2026-05-07 - Iteration 22: partition workload `LINE` literal fix
+
+### Scope
+
+- Investigated the new report that adding partition-focused parameters such as
+  `--partition-types=all --add-drop-partition=10` can trigger:
+  `22P02: invalid line specification: must be two distinct points`
+- Focused only on the PostgreSQL geometric `LINE` value generator.
+- Kept the fix intentionally minimal and limited it to
+  [src/random_test.cpp](/Users/gongliangbiao/Desktop/Codes/pstress/src/random_test.cpp).
+
+### Root Cause
+
+- PostgreSQL accepts `LINE` literals in point-pair form like:
+  `'[(1,1),(2,2)]'::line`
+- PostgreSQL rejects a `LINE` literal when both points are identical:
+  `'[(1,1),(1,1)]'::line`
+  with `22P02: invalid line specification: must be two distinct points`
+- The existing `rand_line_value()` generator produced two points independently
+  but did not enforce that they differ.
+- Under normal probability that collision is rare, but it is still a real bug,
+  and partition-heavy workloads are large enough to eventually expose it.
+
+### Fix
+
+- Updated `rand_line_value()` so the second generated point is retried until it
+  differs from the first point.
+- The change was intentionally minimal:
+  - no change to `POINT`, `LSEG`, `BOX`, `PATH`, `POLYGON`, or `CIRCLE`
+  - no change to table definitions
+  - no change to DDL logic
+  - no change to metadata format
+
+### Validation
+
+- Build: `cmake --build build -j4`
+- PostgreSQL behavior check:
+  - `SELECT '[(1,1),(1,1)]'::line;`
+  - confirmed expected failure with:
+    `ERROR: invalid line specification: must be two distinct points`
+- Partition-heavy smoke:
+  - command family included:
+    `--partition-types=all --add-drop-partition=10 --partition-prob=100 --no-temp-tables`
+  - result: completed successfully
+  - summary: `1104246/1272592` failed, `13.23%` successful
+  - structural result relevant to this fix:
+    - no `22P02`
+    - no `invalid line specification`
+- Controlled 3-minute direct-run regression:
+  - command family included:
+    `--tables=40 --columns=20 --records=300 --exact-initial-records --threads=16 --seconds=180 --partition-types=all --add-drop-partition=10`
+  - result: completed successfully with exit code `0`
+  - summary: `2151/1635544` failed, `99.87%` successful
+  - remaining error codes:
+    - `23505`: `1330`
+    - `23503`: `776`
+    - `25P02`: `40`
+    - `40P01`: `5`
+  - structural check:
+    - no `22P02`
+    - no `invalid line specification`
+    - no `Thread N failed`
+    - no `some other thread failed`
+    - no `FATAL`
+
+### Observation
+
+- A separate 100-thread local run with these extra partition parameters did not
+  reproduce `22P02`, but it did expose unrelated environment/workload issues on
+  this machine:
+  - `FATAL: sorry, too many clients already`
+  - follow-on `relation ... does not exist` caused by early thread failure
+- That high-thread local outcome was not used as the primary validation signal
+  for the `LINE` fix.

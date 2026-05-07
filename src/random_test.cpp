@@ -1441,8 +1441,12 @@ static std::string rand_point_value() {
 }
 
 static std::string rand_line_value() {
-  return "'[" + rand_geom_point_literal() + "," + rand_geom_point_literal() +
-         "]'::line";
+  auto first = rand_geom_point_literal();
+  auto second = rand_geom_point_literal();
+  while (second == first) {
+    second = rand_geom_point_literal();
+  }
+  return "'[" + first + "," + second + "]'::line";
 }
 
 static std::string rand_lseg_value() {
