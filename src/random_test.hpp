@@ -221,7 +221,7 @@ struct Thd1 {
 
 /* Table basic properties */
 struct Table {
-  enum TABLE_TYPES { PARTITION, NORMAL, TEMPORARY, FK } type;
+  enum TABLE_TYPES { PARTITION, NORMAL, TEMPORARY, UNLOGGED, FK } type;
 
   Table(std::string n);
   static Table *table_id(TABLE_TYPES choice, int id);
@@ -285,6 +285,8 @@ struct Table {
       return "PARTITION";
     case TEMPORARY:
       return "TEMPORARY";
+    case UNLOGGED:
+      return "UNLOGGED";
     case FK:
       return "FK";
     }
@@ -299,6 +301,8 @@ struct Table {
       type = NORMAL;
     else if (s.compare("TEMPORARY") == 0)
       type = TEMPORARY;
+    else if (s.compare("UNLOGGED") == 0)
+      type = UNLOGGED;
     else if (s.compare("FK") == 0)
       type = FK;
   };

@@ -136,6 +136,12 @@ void add_options() {
   opt->setArgs(no_argument);
   opt->setBool(false);
 
+  /* Only Unlogged tables */
+  opt = newOption(Option::BOOL, Option::ONLY_UNLOGGED, "only-unlogged-tables");
+  opt->help = "Work only on unlogged tables";
+  opt->setArgs(no_argument);
+  opt->setBool(false);
+
   /* No FK tables */
   opt = newOption(Option::BOOL, Option::NO_FK, "no-fk-tables");
   opt->help = "do not work on foriegn tables";
@@ -154,6 +160,12 @@ void add_options() {
   opt->setArgs(no_argument);
   opt->setBool(false);
 
+  /* NO Unlogged tables */
+  opt = newOption(Option::BOOL, Option::NO_UNLOGGED, "no-unlogged-tables");
+  opt->help = "do not work on unlogged tables";
+  opt->setArgs(no_argument);
+  opt->setBool(false);
+
   opt = newOption(Option::INT, Option::FK_PROB, "fk-prob");
   opt->help = R"(
     Probability of each normal table having the FK. Currently, FKs are only linked
@@ -169,6 +181,10 @@ void add_options() {
   /* Ratio of temporary table to normal table */
   opt = newOption(Option::INT, Option::TEMPORARY_PROB, "temporary-prob");
   opt->help = "Probability of temporary tables";
+  opt->setInt(10);
+
+  opt = newOption(Option::INT, Option::UNLOGGED_PROB, "unlogged-prob");
+  opt->help = "Probability of unlogged tables";
   opt->setInt(10);
 
   /* Initial Records in table */

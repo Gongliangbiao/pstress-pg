@@ -19,6 +19,7 @@ const std::string TABLE_PREFIX = "tt_";
 const std::string PARTITION_SUFFIX = "_p";
 const std::string FK_SUFFIX = "_fk";
 const std::string TEMP_SUFFIX = "_t";
+const std::string UNLOGGED_SUFFIX = "_u";
 const int version = 2;
 /* range for random number int, integers, floats and double.
  more the value, less randomness.
@@ -504,6 +505,8 @@ static Table *pick_table(Table::TABLE_TYPES type, int id) {
     name += FK_SUFFIX;
   } else if (type == Table::PARTITION) {
     name += PARTITION_SUFFIX;
+  } else if (type == Table::UNLOGGED) {
+    name += UNLOGGED_SUFFIX;
   }
   for (auto const &table : *all_tables) {
     if (table->name_ == name)
@@ -578,8 +581,11 @@ static Table *clone_table_metadata(const Table *table) {
   case Table::TEMPORARY:
     copy = new Temporary_table(table->name_);
     break;
+  case Table::UNLOGGED:
+    copy = new Table(table->name_);
+    break;
   default:
-    throw std::runtime_error("transactional ddl clone only supports normal/temporary tables");
+    throw std::runtime_error("transactional ddl clone only supports normal/temporary/unlogged tables");
   }
 
   copy->type = table->type;
@@ -1092,18 +1098,39 @@ int sum_of_all_options(Thd1 *thd) {
       options->at(Option::ONLY_TEMPORARY)->getBool())
     throw std::runtime_error("choose either only partition or only temporary ");
 
+  if (options->at(Option::ONLY_UNLOGGED)->getBool() &&
+      options->at(Option::ONLY_TEMPORARY)->getBool())
+    throw std::runtime_error("choose either only unlogged or only temporary ");
+
+  if (options->at(Option::ONLY_UNLOGGED)->getBool() &&
+      options->at(Option::ONLY_PARTITION)->getBool())
+    throw std::runtime_error("choose either only unlogged or only partition ");
+
   if (options->at(Option::ONLY_PARTITION)->getBool() &&
       options->at(Option::NO_PARTITION)->getBool())
     throw std::runtime_error("choose either only partition or no partition");
 
+  if (options->at(Option::ONLY_UNLOGGED)->getBool() &&
+      options->at(Option::NO_UNLOGGED)->getBool())
+    throw std::runtime_error("choose either only unlogged or no unlogged");
+
   if (options->at(Option::ONLY_PARTITION)->getBool()) {
     options->at(Option::NO_TEMPORARY)->setBool("true");
+    options->at(Option::NO_UNLOGGED)->setBool("true");
     options->at(Option::PARTITION_PROB)->setInt(100);
   }
 
   if (options->at(Option::ONLY_TEMPORARY)->getBool()) {
     options->at(Option::NO_PARTITION)->setBool("true");
+    options->at(Option::NO_UNLOGGED)->setBool("true");
     options->at(Option::TEMPORARY_PROB)->setInt(100);
+  }
+
+  if (options->at(Option::ONLY_UNLOGGED)->getBool()) {
+    options->at(Option::NO_FK)->setBool("true");
+    options->at(Option::NO_PARTITION)->setBool("true");
+    options->at(Option::NO_TEMPORARY)->setBool("true");
+    options->at(Option::UNLOGGED_PROB)->setInt(100);
   }
 
   /* if select is set as zero, disable all type of selects */
@@ -4521,6 +4548,9 @@ Table *Table::table_id(TABLE_TYPES type, int id) {
   case TEMPORARY:
     table = new Temporary_table(name + TEMP_SUFFIX);
     break;
+  case UNLOGGED:
+    table = new Table(name + UNLOGGED_SUFFIX);
+    break;
   default:
     throw std::runtime_error("Unhandle Table type");
   case FK:
@@ -4568,6 +4598,8 @@ std::string Table::definition(bool with_index) {
   std::string def = "CREATE";
   if (type == TEMPORARY)
     def += " TEMPORARY";
+  else if (type == UNLOGGED)
+    def += " UNLOGGED";
   def += " TABLE " + name_ + " (";
 
   if (columns_->size() == 0)
@@ -4623,10 +4655,12 @@ void generate_metadata_for_tables() {
   auto tables = opt_int(TABLES);
 
   auto only_temporary_tables = opt_bool(ONLY_TEMPORARY);
+  auto only_unlogged_tables = opt_bool(ONLY_UNLOGGED);
 
   if (!only_temporary_tables) {
     for (int i = 1; i <= tables; i++) {
-      if (!options->at(Option::ONLY_PARTITION)->getBool()) {
+      if (!options->at(Option::ONLY_PARTITION)->getBool() &&
+          !only_unlogged_tables) {
         auto parent_table = Table::table_id(Table::NORMAL, i);
         all_tables->push_back(parent_table);
 
@@ -4644,7 +4678,12 @@ void generate_metadata_for_tables() {
         }
       }
 
+      if (!options->at(Option::NO_UNLOGGED)->getBool() &&
+          options->at(Option::UNLOGGED_PROB)->getInt() > rand_int(100))
+        all_tables->push_back(Table::table_id(Table::UNLOGGED, i));
+
       if (!options->at(Option::NO_PARTITION)->getBool() &&
+          !only_unlogged_tables &&
           options->at(Option::PARTITION_PROB)->getInt() > rand_int(100))
         all_tables->push_back(Table::table_id(Table::PARTITION, i));
       /*
@@ -5865,6 +5904,8 @@ static std::string load_metadata_from_file() {
       }
     } else if (table_type.compare("NORMAL") == 0) {
       table = new Table(name);
+    } else if (table_type.compare("UNLOGGED") == 0) {
+      table = new Table(name);
     } else if (table_type == "FK") {
       std::string on_update = tab["on_update"].GetString();
       std::string on_delete = tab["on_delete"].GetString();
@@ -6061,7 +6102,8 @@ bool Thd1::load_metadata() {
 /* return true if successful or error out in case of fail */
 bool Thd1::run_some_query() {
   std::vector<Table::TABLE_TYPES> tableTypes = {Table::NORMAL, Table::FK,
-                                                Table::PARTITION};
+                                                Table::PARTITION,
+                                                Table::UNLOGGED};
   execute_sql("SET search_path TO pstress", this);
 
   /* first create temporary tables metadata if requried */

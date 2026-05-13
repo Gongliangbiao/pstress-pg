@@ -51,6 +51,7 @@ struct Option {
     NO_AUTO_INC,
     NO_DESC_INDEX,
     ONLY_TEMPORARY,
+    ONLY_UNLOGGED,
     ONLY_PARTITION,
     INITIAL_RECORDS_IN_TABLE,
     NUMBER_OF_SECONDS_WORKLOAD,
@@ -120,11 +121,13 @@ struct Option {
     EXACT_INITIAL_RECORDS,
     PREPARE,
     NO_TEMPORARY,
+    NO_UNLOGGED,
     NO_PARTITION,
     NO_FK,
     FK_PROB,
     PARTITION_PROB,
     TEMPORARY_PROB,
+    UNLOGGED_PROB,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)
