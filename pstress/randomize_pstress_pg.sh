@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -125,6 +129,15 @@ shell_escape_array() {
   join_by " " "${out[@]}"
 }
 
+safe_filename_component() {
+  local value="$1"
+  value="${value//[^A-Za-z0-9._-]/_}"
+  if [[ -z "$value" ]]; then
+    value="unknown"
+  fi
+  printf '%s' "$value"
+}
+
 get_option_default() {
   local wanted="$1"
   local i
@@ -144,6 +157,13 @@ init_option_metadata() {
   BOOL_OPTIONS=()
   INT_OPTIONS=()
   STRING_OPTIONS=()
+
+  local metadata_file
+  metadata_file="$(mktemp "${TMPDIR:-/tmp}/pstress-pg-help.XXXXXX")"
+  if ! "${pstress_bin}" --help --verbose > "$metadata_file"; then
+    rm -f "$metadata_file"
+    die "failed to read pstress option metadata from: ${pstress_bin}"
+  fi
 
   local current=""
   local line
@@ -174,7 +194,9 @@ init_option_metadata() {
       esac
       current=""
     fi
-  done < <("${pstress_bin}" --help --verbose)
+  done < "$metadata_file"
+
+  rm -f "$metadata_file"
 }
 
 string_choice_for_option() {
@@ -625,9 +647,13 @@ main() {
     RANDOM=$(( current_seed % 32767 ))
 
     local round_tag
+    local host_tag
+    local file_prefix
     round_tag="$(printf '%04d' "$round")"
+    host_tag="$(safe_filename_component "$pg_host")"
+    file_prefix="${host_tag}-round-${round_tag}"
     round_logdir="${logdir}"
-    round_metadir="${logdir}/metadata-round-${round_tag}"
+    round_metadir="${logdir}/${file_prefix}.metadata"
 
     CMD_ARGS=()
     PARAM_LINES=()
@@ -646,8 +672,8 @@ main() {
       reset_phase_from_base
       add_or_replace_param_in_phase "metadata-path" "$round_metadir"
       if ! execute_phase "$round" "prepare" "$start_ts" \
-        "${logdir}/round-${round_tag}.prepare.cmd" \
-        "${logdir}/round-${round_tag}.prepare.params"; then
+        "${logdir}/${file_prefix}.prepare.cmd" \
+        "${logdir}/${file_prefix}.prepare.params"; then
         break
       fi
 
@@ -656,15 +682,15 @@ main() {
       add_or_replace_param_in_phase "metadata-path" "$round_metadir"
       add_or_replace_param_in_phase "step" "2"
       if ! execute_phase "$round" "run" "$start_ts" \
-        "${logdir}/round-${round_tag}.run.cmd" \
-        "${logdir}/round-${round_tag}.run.params"; then
+        "${logdir}/${file_prefix}.run.cmd" \
+        "${logdir}/${file_prefix}.run.params"; then
         break
       fi
     else
       reset_phase_from_base
       if ! execute_phase "$round" "run" "$start_ts" \
-        "${logdir}/round-${round_tag}.cmd" \
-        "${logdir}/round-${round_tag}.params"; then
+        "${logdir}/${file_prefix}.cmd" \
+        "${logdir}/${file_prefix}.params"; then
         break
       fi
     fi
