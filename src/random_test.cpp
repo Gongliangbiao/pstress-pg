@@ -115,6 +115,15 @@ static bool is_list_partition_key_column(const Table *table,
          table->columns_->front() == column;
 }
 
+static bool is_partition_key_column(const Table *table, const Column *column) {
+  return table->type == Table::PARTITION && !table->columns_->empty() &&
+         table->columns_->front() == column;
+}
+
+static std::string partition_key_column_name(const Table *table) {
+  return table->columns_->front()->name_;
+}
+
 static bool list_partition_key_value_expr(Table *table, Column *column,
                                           std::string &value_expr) {
   if (!is_list_partition_key_column(table, column)) {
@@ -4144,7 +4153,9 @@ void Partition::AddDrop(Thd1 *thd) {
     table_mutex.unlock();
 
     std::string max_value_str =
-        read_single_value("SELECT COALESCE(MAX(ip_col), 0) FROM " + max_child, thd);
+        read_single_value("SELECT COALESCE(MAX(" + partition_key_column_name(this) +
+                              "), 0) FROM " + max_child,
+                          thd);
     int max_value = 0;
     if (!max_value_str.empty()) {
       max_value = std::stoi(max_value_str);
@@ -4629,14 +4640,16 @@ std::string Table::definition(bool with_index) {
   }
 
   /* if column has primary key */
+  const std::string partition_key =
+      type == PARTITION ? partition_key_column_name(this) : "";
   for (auto col : *columns_) {
     if (col->primary_key) {
       def += " PRIMARY KEY(";
       if (type == PARTITION) {
         if (rand_int(1) == 0)
-          def += col->name_ + ", ip_col";
+          def += col->name_ + ", " + partition_key;
         else
-          def += "ip_col, " + col->name_;
+          def += partition_key + ", " + col->name_;
       } else
         def += col->name_;
       def += "), ";
@@ -4654,14 +4667,14 @@ std::string Table::definition(bool with_index) {
                                                       : par->part_type;
     switch (part_type) {
     case Partition::RANGE:
-      def += " PARTITION BY RANGE (ip_col)";
+      def += " PARTITION BY RANGE (" + partition_key + ")";
       break;
     case Partition::LIST:
-      def += " PARTITION BY LIST (ip_col)";
+      def += " PARTITION BY LIST (" + partition_key + ")";
       break;
     case Partition::HASH:
     case Partition::KEY:
-      def += " PARTITION BY HASH (ip_col)";
+      def += " PARTITION BY HASH (" + partition_key + ")";
       break;
     }
   }
@@ -4853,6 +4866,10 @@ void Table::ModifyColumn(Thd1 *thd) {
   int i = 0;
   while (i < 50 && col == nullptr) {
     auto col1 = columns_->at(rand_int(columns_->size() - 1));
+    if (is_partition_key_column(this, col1)) {
+      i++;
+      continue;
+    }
     switch (col1->type_) {
     case Column::BLOB:
     case Column::BYTEA:
@@ -5001,6 +5018,10 @@ void Table::DropColumn(Thd1 *thd) {
   auto ps = rand_int(columns_->size() - 1); // position
 
   auto name = columns_->at(ps)->name_;
+  if (is_partition_key_column(this, columns_->at(ps))) {
+    table_mutex.unlock();
+    return;
+  }
 
   if (rand_int(100, 1) <= options->at(Option::PRIMARY_KEY)->getInt() &&
       name.find("pkey") != std::string::npos) {
@@ -5385,6 +5406,10 @@ void Table::ColumnRename(Thd1 *thd) {
   table_mutex.lock();
   auto ps = rand_int(columns_->size() - 1);
   auto name = columns_->at(ps)->name_;
+  if (is_partition_key_column(this, columns_->at(ps))) {
+    table_mutex.unlock();
+    return;
+  }
   /* ALTER column to _rename or back to orignal_name */
   std::string new_name = "_rename";
   static auto s = new_name.size();

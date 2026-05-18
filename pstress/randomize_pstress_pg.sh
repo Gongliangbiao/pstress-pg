@@ -331,7 +331,7 @@ emit_bool_option() {
       fi
       return
       ;;
-    log-failed-queries)
+    log-all-queries|log-query-duration)
       add_flag "$option"
       return
       ;;
@@ -350,7 +350,7 @@ emit_bool_option() {
       maybe_add_flag "$option" 15 >/dev/null || true
       return
       ;;
-    log-all-queries|log-query-duration|log-query-statistics|log-query-numbers|log-client-output|log-succeeded-queries|no-shuffle)
+    log-query-statistics|log-query-numbers|log-client-output|log-succeeded-queries|no-shuffle)
       maybe_add_flag "$option" 12 >/dev/null || true
       return
       ;;
