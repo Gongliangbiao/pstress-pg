@@ -17,9 +17,7 @@ usage: randomize_pstress_pg.sh
   --pg-user <user>
   --pg-db <database>
   [--pg-password <password>]
-  [--pg-socket-dir <dir>]
   --logdir <dir>
-  --server-check-cmd <command-or-script>
   [--round-seconds <seconds>]
   [--max-rounds <count>]
   [--base-seed <seed>]
@@ -91,6 +89,13 @@ add_flag() {
   local name="$1"
   PARAM_LINES+=("--${name}=true")
   CMD_ARGS+=("--${name}")
+}
+
+next_arg_value() {
+  local name="$1"
+  local value="${2:-}"
+  [[ -n "$value" ]] || die "${name} requires a value"
+  printf '%s' "$value"
 }
 
 maybe_add_flag() {
@@ -293,7 +298,7 @@ emit_curated_int() {
     trx-ddl-size)
       add_param "$option" "$(rand_int_range 1 16)"
       ;;
-    pk-prob|fk-prob|partition-prob|temporary-prob)
+    pk-prob|fk-prob|partition-prob|temporary-prob|unlogged-prob)
       add_param "$option" "$(rand_int_range 0 100)"
       ;;
     select-all-rows|select-single-row|select-with-join|select-with-cte|insert-row|update-with-cond|delete-all-rows|delete-with-cond)
@@ -338,7 +343,7 @@ emit_bool_option() {
       maybe_add_flag "$option" 8 >/dev/null || true
       return
       ;;
-    no-partition-tables|only-partition-tables|no-temp-tables|only-temp-tables|no-fk-tables)
+    no-partition-tables|only-partition-tables|no-temp-tables|only-temp-tables|no-unlogged-tables|only-unlogged-tables|no-fk-tables)
       return
       ;;
     no-generated-columns|no-blob|no-auto-inc|no-desc-index|exact-initial-records|check-preload)
@@ -366,6 +371,10 @@ emit_conflict_managed_flags() {
     add_flag "only-temp-tables"
   elif (( table_mode < 30 )) && has_option "no-temp-tables"; then
     add_flag "no-temp-tables"
+  elif (( table_mode < 34 )) && has_option "only-unlogged-tables"; then
+    add_flag "only-unlogged-tables"
+  elif (( table_mode < 42 )) && has_option "no-unlogged-tables"; then
+    add_flag "no-unlogged-tables"
   fi
 
   if has_option "no-fk-tables"; then
@@ -412,16 +421,16 @@ emit_fixed_connection_params() {
   if [[ -n "$pg_password" ]] && has_option "password"; then
     add_param "password" "$pg_password"
   fi
-  if [[ -n "$pg_socket_dir" ]] && has_option "socket"; then
-    add_param "socket" "$pg_socket_dir"
-  fi
 }
 
 emit_non_connection_options() {
   local option
   for option in "${INT_OPTIONS[@]-}"; do
     case "$option" in
-      port|seconds|seed)
+      port)
+        continue
+        ;;
+      seconds|seed)
         emit_curated_int "$option"
         ;;
       step)
@@ -470,7 +479,29 @@ write_round_files() {
 }
 
 run_server_check() {
-  bash -lc "$server_check_cmd"
+  if command -v pg_isready >/dev/null 2>&1; then
+    if [[ -n "$pg_password" ]]; then
+      PGPASSWORD="$pg_password" pg_isready -h "$pg_host" -p "$pg_port" \
+        -U "$pg_user" -d "$pg_db" >/dev/null
+    else
+      pg_isready -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" \
+        >/dev/null
+    fi
+    return
+  fi
+
+  if command -v psql >/dev/null 2>&1; then
+    if [[ -n "$pg_password" ]]; then
+      PGPASSWORD="$pg_password" psql -h "$pg_host" -p "$pg_port" \
+        -U "$pg_user" -d "$pg_db" -c "select 1" >/dev/null
+    else
+      psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" \
+        -c "select 1" >/dev/null
+    fi
+    return
+  fi
+
+  die "pg_isready or psql is required for server health check"
 }
 
 has_prepare_requested() {
@@ -574,27 +605,33 @@ parse_args() {
   pg_user=""
   pg_db=""
   pg_password=""
-  pg_socket_dir=""
   logdir=""
-  server_check_cmd=""
   round_seconds=600
   max_rounds=0
   base_seed=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --pstress-bin) pstress_bin="$2"; shift 2 ;;
-      --pg-host) pg_host="$2"; shift 2 ;;
-      --pg-port) pg_port="$2"; shift 2 ;;
-      --pg-user) pg_user="$2"; shift 2 ;;
-      --pg-db) pg_db="$2"; shift 2 ;;
-      --pg-password) pg_password="$2"; shift 2 ;;
-      --pg-socket-dir) pg_socket_dir="$2"; shift 2 ;;
-      --logdir) logdir="$2"; shift 2 ;;
-      --server-check-cmd) server_check_cmd="$2"; shift 2 ;;
-      --round-seconds) round_seconds="$2"; shift 2 ;;
-      --max-rounds) max_rounds="$2"; shift 2 ;;
-      --base-seed) base_seed="$2"; shift 2 ;;
+      --pstress-bin) pstress_bin="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --pstress-bin=*) pstress_bin="${1#*=}"; shift ;;
+      --pg-host) pg_host="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --pg-host=*) pg_host="${1#*=}"; shift ;;
+      --pg-port) pg_port="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --pg-port=*) pg_port="${1#*=}"; shift ;;
+      --pg-user) pg_user="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --pg-user=*) pg_user="${1#*=}"; shift ;;
+      --pg-db) pg_db="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --pg-db=*) pg_db="${1#*=}"; shift ;;
+      --pg-password) pg_password="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --pg-password=*) pg_password="${1#*=}"; shift ;;
+      --logdir) logdir="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --logdir=*) logdir="${1#*=}"; shift ;;
+      --round-seconds) round_seconds="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --round-seconds=*) round_seconds="${1#*=}"; shift ;;
+      --max-rounds) max_rounds="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --max-rounds=*) max_rounds="${1#*=}"; shift ;;
+      --base-seed) base_seed="$(next_arg_value "$1" "${2:-}")"; shift 2 ;;
+      --base-seed=*) base_seed="${1#*=}"; shift ;;
       --help|-h) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -607,7 +644,6 @@ parse_args() {
   [[ -n "$pg_user" ]] || die "--pg-user is required"
   [[ -n "$pg_db" ]] || die "--pg-db is required"
   [[ -n "$logdir" ]] || die "--logdir is required"
-  [[ -n "$server_check_cmd" ]] || die "--server-check-cmd is required"
   [[ "$round_seconds" =~ ^[0-9]+$ ]] || die "--round-seconds must be numeric"
   [[ "$max_rounds" =~ ^[0-9]+$ ]] || die "--max-rounds must be numeric"
   if [[ -n "$base_seed" ]]; then
