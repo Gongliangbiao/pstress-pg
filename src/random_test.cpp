@@ -4785,7 +4785,7 @@ bool execute_sql(const std::string &sql, Thd1 *thd) {
         thd->thread_log << " sqlstate=" << sqlstate;
       }
       thd->thread_log << std::endl;
-      run_query_failed = true;
+      thd->connection_lost = true;
     }
   } else {
     thd->max_con_fail_count = 0;
@@ -6269,6 +6269,9 @@ bool Thd1::run_some_query() {
         rand_int(1000) < options->at(Option::TRX_DDL_PROB_K)->getInt()) {
       std::lock_guard<std::mutex> ddl_guard(ddl_workload_mutex);
       run_transactional_ddl_block(this, trx_ddl_tables);
+      if (this->connection_lost) {
+        break;
+      }
       if (run_query_failed) {
         break;
       }
@@ -6406,6 +6409,10 @@ bool Thd1::run_some_query() {
       options->at(option)->success_queries++;
       opt_feq[option][1]++;
       success = false;
+    }
+
+    if (this->connection_lost) {
+      break;
     }
 
     if (run_query_failed) {

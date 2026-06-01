@@ -211,6 +211,7 @@ struct Thd1 {
   std::shared_ptr<PGresult> result; // result set of sql
   bool ddl_query = false;     // is the query ddl
   bool success = false;       // if the sql is successfully executed
+  bool connection_lost = false; // current thread lost its backend connection
   int max_con_fail_count = 0; // consecutive failed queries
 
   /* for loading Bulkdata, Primary key of current table is stored in this vector
