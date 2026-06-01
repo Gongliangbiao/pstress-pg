@@ -568,6 +568,58 @@ add_or_replace_param_in_phase() {
   fi
 }
 
+current_phase_step() {
+  local item
+  for item in "${CMD_ARGS[@]-}"; do
+    if [[ "$item" == --step=* ]]; then
+      printf '%s' "${item#*=}"
+      return
+    fi
+  done
+  printf '1'
+}
+
+find_first_failed_thread() {
+  local step="$1"
+  local files=()
+  local file
+  shopt -s nullglob
+  files=("${round_logdir}"/*"_step_${step}_thread-"*.sql)
+  shopt -u nullglob
+
+  local best_key=""
+  local best_thread="none"
+  for file in "${files[@]-}"; do
+    local match
+    match="$(grep -n -m1 -E '(^|[[:space:]])F[[:space:]]|Error code|connection lost|failed, check logs' "$file" 2>/dev/null || true)"
+    [[ -n "$match" ]] || continue
+
+    local line_no="${match%%:*}"
+    local line="${match#*:}"
+    local offset
+    offset="$(printf '%s\n' "$line" | sed -n 's/^[0-9T:-][0-9T:-]*[[:space:]]\([0-9][0-9]*\)=>.*/\1/p')"
+    if [[ -z "$offset" ]]; then
+      offset=999999999999
+    fi
+
+    local thread="unknown"
+    local base
+    base="$(basename "$file")"
+    if [[ "$base" =~ (thread-[0-9]+)\.sql$ ]]; then
+      thread="${BASH_REMATCH[1]}"
+    fi
+
+    local key
+    key="$(printf '%012d:%012d:%s' "$offset" "$line_no" "$file")"
+    if [[ -z "$best_key" || "$key" < "$best_key" ]]; then
+      best_key="$key"
+      best_thread="$thread"
+    fi
+  done
+
+  printf '%s' "$best_thread"
+}
+
 execute_phase() {
   local round="$1"
   local phase="$2"
@@ -592,8 +644,11 @@ execute_phase() {
     status="stop"
   fi
 
-  printf '%s round=%d phase=%s seed=%d exit_code=%d server_check=%s status=%s\n' \
-    "$start_ts" "$round" "$phase" "$current_seed" "$rc" "$server_status" "$status" >> "$summary_log"
+  local first_failed_thread
+  first_failed_thread="$(find_first_failed_thread "$(current_phase_step)")"
+
+  printf '%s round=%d phase=%s seed=%d exit_code=%d server_check=%s status=%s first_failed_thread=%s\n' \
+    "$start_ts" "$round" "$phase" "$current_seed" "$rc" "$server_status" "$status" "$first_failed_thread" >> "$summary_log"
 
   [[ "$status" == "continue" ]]
 }
@@ -669,7 +724,7 @@ main() {
 
   summary_log="${logdir}/run-summary.log"
   if [[ ! -f "$summary_log" ]]; then
-    printf 'timestamp round phase seed exit_code server_check status\n' > "$summary_log"
+    printf 'timestamp round phase seed exit_code server_check status first_failed_thread\n' > "$summary_log"
   fi
 
   local round=1
