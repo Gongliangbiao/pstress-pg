@@ -4031,6 +4031,26 @@ void Table::Optimize(Thd1 *thd) {
               thd);
 }
 
+void Table::Vacuum(Thd1 *thd) {
+  execute_sql("VACUUM " + (type == PARTITION ? pg_partition_target(this) : name_),
+              thd);
+}
+
+void Table::VacuumFull(Thd1 *thd) {
+  if (referenced_by_fk(this)) {
+    return;
+  }
+  if (execute_sql("VACUUM FULL " +
+                      (type == PARTITION ? pg_partition_target(this) : name_),
+                  thd)) {
+    clear_hit_value_cache(this);
+  }
+}
+
+void Table::Checkpoint(Thd1 *thd) {
+  execute_sql("CHECKPOINT", thd);
+}
+
 void Table::Check(Thd1 *thd) {
   auto rel = type == PARTITION ? pg_partition_target(this) : name_;
   get_check_result("SELECT current_database(), '" + rel + "', 'check', 'OK'",
@@ -5353,6 +5373,189 @@ void Table::AddIndex(Thd1 *thd) {
   }
 }
 
+void Table::AddIndexConcurrently(Thd1 *thd) {
+  static size_t max_columns = opt_int(INDEX_COLUMNS);
+  table_mutex.lock();
+  Index *id = nullptr;
+  for (int attempt = 0; attempt < 64 && id == nullptr; ++attempt) {
+    auto i = rand_int(100000, 1000);
+    std::string candidate = name_ + "coni" + std::to_string(i);
+    if (!index_name_exists(this, candidate))
+      id = new Index(candidate);
+  }
+
+  if (id == nullptr) {
+    table_mutex.unlock();
+    return;
+  }
+
+  int no_of_columns = rand_int(
+      (max_columns < columns_->size() ? max_columns : columns_->size()), 1);
+  no_of_columns = std::min(no_of_columns, 4);
+
+  std::vector<int> col_pos;
+  size_t attempts = 0;
+  while (col_pos.size() < (size_t)no_of_columns &&
+         attempts++ < columns_->size() * 8) {
+    int current = rand_int(columns_->size() - 1);
+    if (!pg_indexable_column(columns_->at(current)))
+      continue;
+    bool already_added = false;
+    for (auto id : col_pos) {
+      if (id == current)
+        already_added = true;
+    }
+    if (!already_added)
+      col_pos.push_back(current);
+  }
+
+  for (auto pos : col_pos) {
+    auto col = columns_->at(pos);
+    bool column_desc = rand_int(100) < DESC_INDEXES_IN_COLUMN;
+    id->AddInternalColumn(new Ind_col(col, column_desc));
+    if (id->columns_->size() >= 4 || pg_index_total_width(id) > 192) {
+      delete id->columns_->back();
+      id->columns_->pop_back();
+      break;
+    }
+  }
+
+  if (id->columns_->empty()) {
+    table_mutex.unlock();
+    delete id;
+    return;
+  }
+
+  std::string sql = "CREATE " + std::string(id->unique ? "UNIQUE " : "") +
+                    "INDEX CONCURRENTLY " + id->name_ + " ON " + name_ + "(" +
+                    index_column_list(id) + ")";
+  table_mutex.unlock();
+
+  if (execute_sql(sql, thd)) {
+    table_mutex.lock();
+    auto do_not_add = false;
+    for (auto ind : *indexes_) {
+      if (ind->name_.compare(id->name_) == 0)
+        do_not_add = true;
+    }
+    if (!do_not_add)
+      AddInternalIndex(id);
+    else
+      delete id;
+    table_mutex.unlock();
+  } else {
+    delete id;
+  }
+}
+
+void Table::Reindex(Thd1 *thd) {
+  std::string target = type == PARTITION ? pg_partition_target(this) : name_;
+  if (rand_int(2) == 0) {
+    execute_sql("REINDEX TABLE " + target, thd);
+    return;
+  }
+
+  table_mutex.lock();
+  if (!indexes_->empty()) {
+    auto *index = indexes_->at(rand_int(indexes_->size() - 1));
+    std::string idx_name = index->name_;
+    table_mutex.unlock();
+    execute_sql("REINDEX INDEX CONCURRENTLY " + idx_name, thd);
+  } else {
+    table_mutex.unlock();
+    execute_sql("REINDEX TABLE CONCURRENTLY " + target, thd);
+  }
+}
+
+void Table::ClusterTable(Thd1 *thd) {
+  table_mutex.lock();
+  if (indexes_->empty() || type == Table::FK) {
+    table_mutex.unlock();
+    return;
+  }
+
+  auto *idx = indexes_->at(rand_int(indexes_->size() - 1));
+  std::string target = type == PARTITION ? pg_partition_target(this) : name_;
+  std::string sql = "CLUSTER " + target + " USING " + idx->name_;
+  table_mutex.unlock();
+
+  execute_sql_with_lock_timeout(sql, thd);
+}
+
+void Table::AddBrinExpressionIndex(Thd1 *thd) {
+  table_mutex.lock();
+  if (columns_->empty()) {
+    table_mutex.unlock();
+    return;
+  }
+
+  int index_type = rand_int(4);
+  std::string sql;
+
+  if (index_type <= 2) {
+    std::vector<int> candidates;
+    for (size_t i = 0; i < columns_->size(); ++i) {
+      auto *col = columns_->at(i);
+      if (col->type_ == Column::INT || col->type_ == Column::INTEGER ||
+          col->type_ == Column::BIGINT || col->type_ == Column::NUMERIC ||
+          col->type_ == Column::TIMESTAMP ||
+          col->type_ == Column::TIMESTAMPTZ || col->type_ == Column::DATE) {
+        candidates.push_back(static_cast<int>(i));
+      }
+    }
+    if (!candidates.empty()) {
+      auto *col = columns_->at(candidates.at(rand_int(candidates.size() - 1)));
+      std::string idx_name =
+          "brin_" + name_ + "_" + col->name_ + "_" + std::to_string(rand_int(100000));
+      int pages_per_range = rand_int(128, 4);
+      sql = "CREATE INDEX " + idx_name + " ON " + name_ + " USING brin (" +
+            col->name_ + ") WITH (pages_per_range = " +
+            std::to_string(pages_per_range) + ")";
+    }
+  } else if (index_type == 3) {
+    std::vector<int> candidates;
+    for (size_t i = 0; i < columns_->size(); ++i) {
+      auto *col = columns_->at(i);
+      if (col->type_ == Column::VARCHAR || col->type_ == Column::CHAR ||
+          col->type_ == Column::INT || col->type_ == Column::INTEGER) {
+        candidates.push_back(static_cast<int>(i));
+      }
+    }
+    if (!candidates.empty()) {
+      auto *col = columns_->at(candidates.at(rand_int(candidates.size() - 1)));
+      std::string idx_name =
+          "expr_" + name_ + "_" + col->name_ + "_" + std::to_string(rand_int(100000));
+      std::string expr = col->name_;
+      if (col->type_ == Column::VARCHAR || col->type_ == Column::CHAR)
+        expr = "lower(" + col->name_ + ")";
+      else if (col->type_ == Column::INT || col->type_ == Column::INTEGER)
+        expr = "abs(" + col->name_ + ")";
+      sql = "CREATE INDEX " + idx_name + " ON " + name_ + " (" + expr + ")";
+    }
+  } else {
+    std::vector<int> candidates;
+    for (size_t i = 0; i < columns_->size(); ++i) {
+      auto *col = columns_->at(i);
+      if (col->type_ == Column::JSONB || col->type_ == Column::INTARRAY ||
+          col->type_ == Column::TEXTARRAY) {
+        candidates.push_back(static_cast<int>(i));
+      }
+    }
+    if (!candidates.empty()) {
+      auto *col = columns_->at(candidates.at(rand_int(candidates.size() - 1)));
+      std::string idx_name =
+          "gin_" + name_ + "_" + col->name_ + "_" + std::to_string(rand_int(100000));
+      std::string opclass = col->type_ == Column::JSONB ? " jsonb_path_ops" : "";
+      sql = "CREATE INDEX " + idx_name + " ON " + name_ + " USING gin (" +
+            col->name_ + opclass + ")";
+    }
+  }
+
+  table_mutex.unlock();
+  if (!sql.empty())
+    execute_sql_with_lock_timeout(sql, thd);
+}
+
 void Table::DeleteAllRows(Thd1 *thd) {
   std::string sql = "DELETE FROM " + name_;
   if (type == PARTITION && rand_int(100) < 98) {
@@ -5864,6 +6067,118 @@ static void grammar_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
     execute_sql(sql, thd);
   } else
     std::cout << "NOT ABLE TO FIND any SQL in special SQL" << std::endl;
+}
+
+static void create_matview(Table *table, Thd1 *thd) {
+  std::string mv_name =
+      "mv_" + table->name_ + "_" + std::to_string(rand_int(100000, 1000));
+
+  table->table_mutex.lock();
+  std::vector<std::string> col_names;
+  for (auto *col : *table->columns_)
+    col_names.push_back(col->name_);
+  table->table_mutex.unlock();
+
+  if (col_names.empty())
+    return;
+
+  int num_cols = rand_int(std::min(4, static_cast<int>(col_names.size())), 1);
+  std::string proj_cols;
+  std::vector<int> picked;
+  for (int i = 0; i < num_cols; ++i) {
+    int idx = rand_int(col_names.size() - 1);
+    bool duplicate = false;
+    for (auto p : picked) {
+      if (p == idx)
+        duplicate = true;
+    }
+    if (duplicate)
+      continue;
+    picked.push_back(idx);
+    if (!proj_cols.empty())
+      proj_cols += ", ";
+    proj_cols += col_names[idx];
+  }
+
+  if (proj_cols.empty())
+    proj_cols = "*";
+
+  execute_sql_with_lock_timeout("CREATE MATERIALIZED VIEW " + mv_name +
+                                    " AS SELECT " + proj_cols + " FROM " +
+                                    table->name_ + " WITH DATA",
+                                thd);
+}
+
+static void refresh_matview_concurrently(Table *, Thd1 *thd) {
+  auto mv_name = read_single_value(
+      "SELECT matviewname FROM pg_matviews WHERE schemaname = current_schema() "
+      "ORDER BY random() LIMIT 1",
+      thd);
+  if (mv_name.empty())
+    return;
+
+  if (!execute_sql("REFRESH MATERIALIZED VIEW CONCURRENTLY " + mv_name, thd))
+    execute_sql("REFRESH MATERIALIZED VIEW " + mv_name, thd);
+}
+
+void Table::SelectMatview(Thd1 *thd) {
+  auto mv_name = read_single_value(
+      "SELECT matviewname FROM pg_matviews WHERE schemaname = current_schema() "
+      "ORDER BY random() LIMIT 1",
+      thd);
+  if (mv_name.empty())
+    return;
+
+  execute_sql("SELECT * FROM " + mv_name + " LIMIT " +
+                  std::to_string(rand_int(50, 1)),
+              thd);
+}
+
+void Table::DropMatview(Thd1 *thd) {
+  auto mv_name = read_single_value(
+      "SELECT matviewname FROM pg_matviews WHERE schemaname = current_schema() "
+      "ORDER BY random() LIMIT 1",
+      thd);
+  if (mv_name.empty())
+    return;
+
+  execute_sql("DROP MATERIALIZED VIEW IF EXISTS " + mv_name, thd);
+}
+
+static void prepared_tx_stress(Table *table, Thd1 *thd) {
+  if (table->type == Table::TEMPORARY)
+    return;
+
+  std::string tx_name = "pstress_tx_" + std::to_string(rand_int(100000, 1000));
+  execute_sql("BEGIN", thd);
+
+  switch (rand_int(3)) {
+  case 0:
+    table->InsertRandomRow(thd);
+    break;
+  case 1:
+    table->UpdateRandomROW(thd);
+    break;
+  case 2:
+    table->DeleteRandomRow(thd);
+    break;
+  default:
+    table->InsertRandomRow(thd);
+    break;
+  }
+
+  if (thd->connection_lost)
+    return;
+
+  if (!execute_sql("PREPARE TRANSACTION '" + tx_name + "'", thd)) {
+    execute_sql("ROLLBACK", thd);
+    return;
+  }
+
+  if (rand_int(100) < 60)
+    execute_sql("COMMIT PREPARED '" + tx_name + "'", thd);
+  else
+    execute_sql("ROLLBACK PREPARED '" + tx_name + "'", thd);
 }
 
 /* save metadata to a file */
@@ -6395,6 +6710,42 @@ bool Thd1::run_some_query() {
       break;
     case Option::GRAMMAR_SQL:
       grammar_sql(all_session_tables, this);
+      break;
+    case Option::VACUUM_TABLE:
+      table->Vacuum(this);
+      break;
+    case Option::VACUUM_FULL:
+      table->VacuumFull(this);
+      break;
+    case Option::CHECKPOINT:
+      table->Checkpoint(this);
+      break;
+    case Option::CREATE_INDEX_CONCURRENTLY:
+      table->AddIndexConcurrently(this);
+      break;
+    case Option::REINDEX:
+      table->Reindex(this);
+      break;
+    case Option::CLUSTER_TABLE:
+      table->ClusterTable(this);
+      break;
+    case Option::BRIN_EXPRESSION_INDEX:
+      table->AddBrinExpressionIndex(this);
+      break;
+    case Option::CREATE_MATVIEW:
+      create_matview(table, this);
+      break;
+    case Option::REFRESH_MATVIEW_CONCURRENTLY:
+      refresh_matview_concurrently(table, this);
+      break;
+    case Option::SELECT_MATVIEW:
+      table->SelectMatview(this);
+      break;
+    case Option::DROP_MATVIEW:
+      table->DropMatview(this);
+      break;
+    case Option::PREPARED_TRANSACTION_STRESS:
+      prepared_tx_stress(table, this);
       break;
 
     default:

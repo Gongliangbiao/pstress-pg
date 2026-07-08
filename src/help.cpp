@@ -187,6 +187,81 @@ void add_options() {
   opt->help = "Probability of unlogged tables";
   opt->setInt(10);
 
+  opt = newOption(Option::INT, Option::VACUUM_TABLE, "vacuum");
+  opt->help = "VACUUM table or partition child";
+  opt->setInt(3);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::VACUUM_FULL, "vacuum-full");
+  opt->help = "VACUUM FULL table or partition child";
+  opt->setInt(3);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::CHECKPOINT, "checkpoint");
+  opt->help = "CHECKPOINT command";
+  opt->setInt(1);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::CREATE_INDEX_CONCURRENTLY,
+                  "create-index-concurrently");
+  opt->help = "create index concurrently on a random table";
+  opt->setInt(5);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::REINDEX, "reindex");
+  opt->help = "REINDEX table or index";
+  opt->setInt(3);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::CLUSTER_TABLE, "cluster-table");
+  opt->help = "CLUSTER table on a random index";
+  opt->setInt(2);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::BRIN_EXPRESSION_INDEX,
+                  "brin-expression-index");
+  opt->help = "create BRIN, expression, or GIN index on a random table";
+  opt->setInt(3);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::CREATE_MATVIEW, "create-matview");
+  opt->help = "CREATE MATERIALIZED VIEW from a random table";
+  opt->setInt(5);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::REFRESH_MATVIEW_CONCURRENTLY,
+                  "refresh-matview-concurrently");
+  opt->help = "REFRESH MATERIALIZED VIEW CONCURRENTLY with non-concurrent fallback";
+  opt->setInt(5);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::SELECT_MATVIEW, "select-matview");
+  opt->help = "SELECT from a random materialized view";
+  opt->setInt(5);
+  opt->setSQL();
+
+  opt = newOption(Option::INT, Option::DROP_MATVIEW, "drop-matview");
+  opt->help = "DROP MATERIALIZED VIEW IF EXISTS on a random materialized view";
+  opt->setInt(2);
+  opt->setSQL();
+  opt->setDDL();
+
+  opt = newOption(Option::INT, Option::PREPARED_TRANSACTION_STRESS,
+                  "prepared-tx-stress");
+  opt->help = "run PREPARE TRANSACTION and random COMMIT/ROLLBACK PREPARED";
+  opt->setInt(5);
+  opt->setSQL();
+  opt->setDDL();
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =

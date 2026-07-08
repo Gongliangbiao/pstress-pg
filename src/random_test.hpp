@@ -241,6 +241,9 @@ struct Table {
   void CopyDefaultIndex(Table *table);
   void DropCreate(Thd1 *thd);
   void Optimize(Thd1 *thd);
+  void Vacuum(Thd1 *thd);
+  void VacuumFull(Thd1 *thd);
+  void Checkpoint(Thd1 *thd);
   void Analyze(Thd1 *thd);
   void Check(Thd1 *thd);
   void Truncate(Thd1 *thd);
@@ -251,6 +254,12 @@ struct Table {
   void AddColumn(Thd1 *thd);
   void DropIndex(Thd1 *thd);
   void AddIndex(Thd1 *thd);
+  void AddIndexConcurrently(Thd1 *thd);
+  void Reindex(Thd1 *thd);
+  void ClusterTable(Thd1 *thd);
+  void AddBrinExpressionIndex(Thd1 *thd);
+  void SelectMatview(Thd1 *thd);
+  void DropMatview(Thd1 *thd);
   void DeleteRandomRow(Thd1 *thd);
   void UpdateRandomROW(Thd1 *thd);
   void SelectRandomRow(Thd1 *thd);
