@@ -35,7 +35,6 @@ const size_t k_generated_dependency_soft_cap = 4;
 const size_t k_generated_dependency_hard_cap = 8;
 const int k_generated_text_budget_min = 32;
 const int k_generated_text_budget_max = 128;
-const std::string k_add_column_lock_timeout = "1000ms";
 
 static std::vector<Table *> *all_tables = new std::vector<Table *>;
 static std::vector<std::string> locks;
@@ -71,18 +70,6 @@ static bool is_connection_lost(const PGconn *conn, const PGresult *result) {
   }
   return strncmp(sqlstate, "08", 2) == 0 || strcmp(sqlstate, "57P01") == 0 ||
          strcmp(sqlstate, "57P02") == 0 || strcmp(sqlstate, "57P03") == 0;
-}
-
-static bool execute_sql_with_lock_timeout(const std::string &sql, Thd1 *thd) {
-  if (!execute_sql("SET lock_timeout = '" + k_add_column_lock_timeout + "'",
-                   thd)) {
-    return false;
-  }
-
-  bool success = execute_sql(sql, thd);
-  execute_sql("RESET lock_timeout", thd);
-  thd->success = success;
-  return success;
 }
 
 static std::string partition_child_name(const Table *table,
@@ -922,11 +909,6 @@ static bool run_transactional_ddl_block(Thd1 *thd,
     goto cleanup;
   }
   started = true;
-
-  if (!execute_sql("SET LOCAL lock_timeout = '" + k_add_column_lock_timeout + "'",
-                   thd)) {
-    goto cleanup;
-  }
 
   statements = rand_int(max_size, 1);
   for (int i = 0; i < statements; ++i) {
@@ -5234,7 +5216,7 @@ void Table::AddColumn(Thd1 *thd) {
 
   table_mutex.unlock();
 
-  if (execute_sql_with_lock_timeout(sql, thd)) {
+  if (execute_sql(sql, thd)) {
     table_mutex.lock();
     auto add_new_column =
         true; // check if there is already a column with this name
@@ -5479,7 +5461,7 @@ void Table::ClusterTable(Thd1 *thd) {
   std::string sql = "CLUSTER " + target + " USING " + idx->name_;
   table_mutex.unlock();
 
-  execute_sql_with_lock_timeout(sql, thd);
+  execute_sql(sql, thd);
 }
 
 void Table::AddBrinExpressionIndex(Thd1 *thd) {
@@ -5553,7 +5535,7 @@ void Table::AddBrinExpressionIndex(Thd1 *thd) {
 
   table_mutex.unlock();
   if (!sql.empty())
-    execute_sql_with_lock_timeout(sql, thd);
+    execute_sql(sql, thd);
 }
 
 void Table::DeleteAllRows(Thd1 *thd) {
@@ -6103,10 +6085,9 @@ static void create_matview(Table *table, Thd1 *thd) {
   if (proj_cols.empty())
     proj_cols = "*";
 
-  execute_sql_with_lock_timeout("CREATE MATERIALIZED VIEW " + mv_name +
-                                    " AS SELECT " + proj_cols + " FROM " +
-                                    table->name_ + " WITH DATA",
-                                thd);
+  execute_sql("CREATE MATERIALIZED VIEW " + mv_name + " AS SELECT " +
+                  proj_cols + " FROM " + table->name_ + " WITH DATA",
+              thd);
 }
 
 static void refresh_matview_concurrently(Table *, Thd1 *thd) {
