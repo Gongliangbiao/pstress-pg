@@ -1144,6 +1144,8 @@ int sum_of_all_options(Thd1 *thd) {
     options->at(Option::PG18_NOT_NULL_CONSTRAINT)->setInt(0);
     options->at(Option::PG18_TEMPORAL_CONSTRAINTS)->setInt(0);
     options->at(Option::PG18_COPY)->setInt(0);
+    options->at(Option::PG18_MERGE)->setInt(0);
+    options->at(Option::PG18_PARTITION_OPS)->setInt(0);
     options->at(Option::PG18_EXPLAIN)->setInt(0);
     options->at(Option::PG18_FUNCTIONS)->setInt(0);
   }
@@ -6580,6 +6582,112 @@ static void pg18_temporal_constraints(Thd1 *thd) {
   }
 }
 
+static void pg18_merge(Table *table, Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18) || table == nullptr)
+    return;
+  if (table->type != Table::NORMAL && table->type != Table::UNLOGGED)
+    return;
+
+  table->table_mutex.lock();
+  auto pk_columns = primary_key_columns(table);
+  if (pk_columns.size() != 1) {
+    table->table_mutex.unlock();
+    return;
+  }
+
+  Column *pk = pk_columns.front();
+  Column *update_column = nullptr;
+  for (auto *column : *table->columns_) {
+    if (!column->primary_key && !column->auto_increment &&
+        column->type_ != Column::GENERATED) {
+      update_column = column;
+      break;
+    }
+  }
+  if (update_column == nullptr) {
+    table->table_mutex.unlock();
+    return;
+  }
+
+  auto table_name = table->name_;
+  auto pk_name = pk->name_;
+  auto update_name = update_column->name_;
+  auto update_value_1 = update_column->referenced_key
+                            ? random_unique_value_expr(update_column)
+                            : update_column->rand_value();
+  auto update_value_2 = update_column->referenced_key
+                            ? random_unique_value_expr(update_column)
+                            : update_column->rand_value();
+  table->table_mutex.unlock();
+
+  auto pk_value_1 = read_single_value("SELECT " + pk_name + "::text FROM " +
+                                          table_name + " ORDER BY " + pk_name +
+                                          " LIMIT 1",
+                                      thd);
+  auto pk_value_2 = read_single_value("SELECT " + pk_name + "::text FROM " +
+                                          table_name + " ORDER BY " + pk_name +
+                                          " LIMIT 1 OFFSET 1",
+                                      thd);
+  if (pk_value_1.empty() || pk_value_2.empty() || pk_value_1 == pk_value_2)
+    return;
+
+  auto sql = "MERGE INTO " + table_name + " AS t USING (VALUES (" +
+             pk_value_1 + ", " + update_value_1 + "), (" + pk_value_2 +
+             ", " + update_value_2 + ")) AS s(" + pk_name + ", " +
+             update_name + ") ON t." + pk_name + " = s." + pk_name +
+             " WHEN MATCHED THEN UPDATE SET " + update_name + " = s." +
+             update_name + " WHEN NOT MATCHED THEN INSERT (" + pk_name +
+             ", " + update_name + ") VALUES (s." + pk_name + ", s." +
+             update_name + ") RETURNING old.*, new.*";
+  execute_sql(sql, thd);
+}
+
+static void pg18_partition_ops(Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18))
+    return;
+
+  auto suffix = std::to_string(thd->thread_id) + "_" +
+                std::to_string(++pg18_temporal_table_seq);
+  auto table_name = "pg18part_pstress_" + suffix;
+  auto part_name = table_name + "_p0";
+  auto detached_name = table_name + "_detached";
+
+  if (rand_int(1) == 0) {
+    if (!execute_sql("CREATE TABLE " + table_name +
+                         "(id INT, payload INT, "
+                         "payload_v INT GENERATED ALWAYS AS (payload + 1) "
+                         "VIRTUAL) PARTITION BY RANGE (id)",
+                     thd))
+      return;
+    if (execute_sql("CREATE TABLE " + part_name + " PARTITION OF " +
+                        table_name + " FOR VALUES FROM (0) TO (1000000)",
+                    thd)) {
+      execute_sql("INSERT INTO " + table_name +
+                      "(id, payload) VALUES (1, 10), (2, 20)",
+                  thd);
+      execute_sql("SELECT id, payload_v FROM " + table_name + " LIMIT 8", thd);
+    }
+    execute_sql("DROP TABLE IF EXISTS " + table_name + " CASCADE", thd);
+    return;
+  }
+
+  if (!execute_sql("CREATE TABLE " + table_name +
+                       "(id INT, payload INT) PARTITION BY RANGE (id)",
+                   thd))
+    return;
+  if (execute_sql("CREATE TABLE " + part_name + " PARTITION OF " +
+                      table_name + " FOR VALUES FROM (0) TO (1000000)",
+                  thd)) {
+    execute_sql("ALTER TABLE " + table_name + " DETACH PARTITION " +
+                    part_name + " CONCURRENTLY",
+                thd);
+    execute_sql("ALTER TABLE " + part_name + " RENAME TO " + detached_name,
+                thd);
+  }
+  execute_sql("DROP TABLE IF EXISTS " + table_name + " CASCADE", thd);
+  execute_sql("DROP TABLE IF EXISTS " + detached_name + " CASCADE", thd);
+}
+
 static std::string pg18_copy_base_source(Table *table,
                                          int partition_child_probability = 10) {
   if (table == nullptr)
@@ -7326,6 +7434,12 @@ bool Thd1::run_some_query() {
       break;
     case Option::PG18_TEMPORAL_CONSTRAINTS:
       pg18_temporal_constraints(this);
+      break;
+    case Option::PG18_MERGE:
+      pg18_merge(table, this);
+      break;
+    case Option::PG18_PARTITION_OPS:
+      pg18_partition_ops(this);
       break;
     case Option::PG18_COPY:
       pg18_copy(table, this);

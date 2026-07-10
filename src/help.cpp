@@ -290,6 +290,18 @@ void add_options() {
   opt->help = "probability to add PostgreSQL 18 RETURNING old/new to DML";
   opt->setInt(5);
 
+  opt = newOption(Option::INT, Option::PG18_MERGE, "pg18-merge");
+  opt->help = "run PostgreSQL 18 MERGE workloads with RETURNING old/new";
+  opt->setInt(5);
+  opt->setSQL();
+
+  opt = newOption(Option::INT, Option::PG18_PARTITION_OPS,
+                  "pg18-partition-ops");
+  opt->help = "run PostgreSQL 18 partition operations";
+  opt->setInt(5);
+  opt->setSQL();
+  opt->setDDL();
+
   opt = newOption(Option::INT, Option::PG18_COPY, "pg18-copy");
   opt->help = "run PostgreSQL 18 COPY workloads";
   opt->setInt(5);
