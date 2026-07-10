@@ -140,6 +140,7 @@ struct Option {
     SELECT_MATVIEW,
     DROP_MATVIEW,
     PREPARED_TRANSACTION_STRESS,
+    PG18_FUNCTIONS,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)

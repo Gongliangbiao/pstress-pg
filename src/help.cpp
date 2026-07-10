@@ -262,6 +262,11 @@ void add_options() {
   opt->setSQL();
   opt->setDDL();
 
+  opt = newOption(Option::INT, Option::PG18_FUNCTIONS, "pg18-functions");
+  opt->help = "run PostgreSQL 18 built-in function queries";
+  opt->setInt(5);
+  opt->setSQL();
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =

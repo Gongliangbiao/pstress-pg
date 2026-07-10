@@ -1024,10 +1024,14 @@ static std::string read_single_value(const std::string &sql, Thd1 *thd) {
   return query_result;
 }
 
+static bool pg_server_at_least(Thd1 *thd, int major) {
+  return thd != nullptr && thd->conn != nullptr &&
+         PQserverVersion(thd->conn) >= major * 10000;
+}
+
 /* return probabality of all options and disable some feature based on user
  * request/ branch/ fork */
 int sum_of_all_options(Thd1 *thd) {
-  (void)thd;
   options->at(Option::ADD_DROP_PARTITION)->setInt(0);
   options->at(Option::DROP_COLUMN)->setInt(0);
   options->at(Option::ALTER_COLUMN_MODIFY)->setInt(0);
@@ -1063,6 +1067,9 @@ int sum_of_all_options(Thd1 *thd) {
     throw std::runtime_error(
         "invalid range for --max-partition. Choose between 1 and 8192");
   ;
+
+  if (!pg_server_at_least(thd, 18))
+    options->at(Option::PG18_FUNCTIONS)->setInt(0);
 
   auto lock = opt_string(LOCK);
   if (lock.compare("all") == 0) {
@@ -6051,6 +6058,24 @@ static void grammar_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
     std::cout << "NOT ABLE TO FIND any SQL in special SQL" << std::endl;
 }
 
+static void pg18_functions(Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18))
+    return;
+
+  static const std::vector<std::string> sqls = {
+      "SELECT uuidv7(), uuidv4()",
+      "SELECT array_sort(ARRAY[3, 1, 2]), array_reverse(ARRAY[1, 2, 3])",
+      "SELECT reverse('\\\\x123456'::bytea)",
+      "SELECT casefold(U&'Stra\\00DFe')",
+      "SELECT crc32('postgres'::bytea), crc32c('postgres'::bytea)",
+      "SELECT gamma(5.0), lgamma(5.0)",
+      "SELECT jsonb_strip_nulls('{\"a\": null, \"b\": [1, null], "
+      "\"c\": {\"d\": null}}'::jsonb, true)",
+      "SELECT EXTRACT(WEEK FROM TIMESTAMP '2026-01-05')"};
+
+  execute_sql(sqls.at(rand_int(sqls.size() - 1)), thd);
+}
+
 static void create_matview(Table *table, Thd1 *thd) {
   std::string mv_name =
       "mv_" + table->name_ + "_" + std::to_string(rand_int(100000, 1000));
@@ -6727,6 +6752,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::PREPARED_TRANSACTION_STRESS:
       prepared_tx_stress(table, this);
+      break;
+    case Option::PG18_FUNCTIONS:
+      pg18_functions(this);
       break;
 
     default:
