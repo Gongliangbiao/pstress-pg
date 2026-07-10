@@ -17,7 +17,8 @@ class Pg18ReturningOldNewStaticTest(unittest.TestCase):
         self.assertIn("RETURNING_OLD_NEW", self.common)
         self.assertIn('"returning-old-new"', self.help)
         self.assertIn("RETURNING old/new", self.help)
-        self.assertIn("returning-old-new|pg18-functions", self.randomizer)
+        self.assertIn("returning-old-new|pg18-explain|pg18-functions",
+                      self.randomizer)
 
     def test_returning_old_new_is_pg18_gated(self):
         self.assertIn("use_returning_old_new", self.source)

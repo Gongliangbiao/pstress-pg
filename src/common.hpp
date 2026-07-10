@@ -142,6 +142,7 @@ struct Option {
     DROP_MATVIEW,
     PREPARED_TRANSACTION_STRESS,
     RETURNING_OLD_NEW,
+    PG18_EXPLAIN,
     PG18_FUNCTIONS,
     MAX
   } option;

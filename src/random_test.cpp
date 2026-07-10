@@ -1100,6 +1100,7 @@ int sum_of_all_options(Thd1 *thd) {
 
   if (!pg_server_at_least(thd, 18)) {
     options->at(Option::RETURNING_OLD_NEW)->setInt(0);
+    options->at(Option::PG18_EXPLAIN)->setInt(0);
     options->at(Option::PG18_FUNCTIONS)->setInt(0);
   }
 
@@ -6123,6 +6124,27 @@ static void pg18_functions(Thd1 *thd) {
   execute_sql(sqls.at(rand_int(sqls.size() - 1)), thd);
 }
 
+static void pg18_explain(Table *table, Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18) || table == nullptr)
+    return;
+
+  table->table_mutex.lock();
+  auto source = random_read_source(table);
+  table->table_mutex.unlock();
+
+  if (source.empty())
+    return;
+
+  static const std::vector<std::string> explain_options = {
+      "MEMORY",
+      "ANALYZE, SERIALIZE TEXT",
+      "ANALYZE, WAL"};
+  auto option = explain_options.at(rand_int(explain_options.size() - 1));
+  auto sql = "EXPLAIN (" + option + ") SELECT * FROM " + source + " LIMIT " +
+             std::to_string(rand_int(64, 1));
+  execute_sql(sql, thd);
+}
+
 static void create_matview(Table *table, Thd1 *thd) {
   std::string mv_name =
       "mv_" + table->name_ + "_" + std::to_string(rand_int(100000, 1000));
@@ -6801,6 +6823,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::PREPARED_TRANSACTION_STRESS:
       prepared_tx_stress(table, this);
+      break;
+    case Option::PG18_EXPLAIN:
+      pg18_explain(table, this);
       break;
     case Option::PG18_FUNCTIONS:
       pg18_functions(this);

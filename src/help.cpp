@@ -271,6 +271,11 @@ void add_options() {
   opt->help = "probability to add PostgreSQL 18 RETURNING old/new to DML";
   opt->setInt(5);
 
+  opt = newOption(Option::INT, Option::PG18_EXPLAIN, "pg18-explain");
+  opt->help = "run PostgreSQL 18 EXPLAIN queries with MEMORY, SERIALIZE, or WAL";
+  opt->setInt(5);
+  opt->setSQL();
+
   opt = newOption(Option::INT, Option::PG18_FUNCTIONS, "pg18-functions");
   opt->help = "run PostgreSQL 18 built-in function queries";
   opt->setInt(5);
