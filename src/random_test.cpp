@@ -41,6 +41,7 @@ static std::vector<std::string> locks;
 static std::vector<std::string> algorithms;
 static int g_max_columns_length = 30;
 static int sum_of_all_opts = 0; // sum of all probablility
+static int g_server_version_num = 0;
 std::mutex ddl_logs_write;
 static std::chrono::system_clock::time_point start_time =
     std::chrono::system_clock::now();
@@ -354,6 +355,10 @@ static bool fk_supporting_index(const Index *index) {
 }
 
 static bool pg_indexable_column(const Column *column) {
+  if (column != nullptr && column->type_ == Column::GENERATED &&
+      static_cast<const Generated_Column *>(column)->generated_kind ==
+          Generated_Column::VIRTUAL)
+    return false;
   return pg_index_width_estimate(column) <= 64;
 }
 
@@ -541,7 +546,8 @@ static Column *clone_column_for_table(const Column *column, Table *owner) {
   if (column->type_ == Column::GENERATED) {
     const auto *generated = static_cast<const Generated_Column *>(column);
     copy = new Generated_Column(column->name_, owner, generated->str,
-                                Column::col_type_to_string(generated->generate_type()));
+                                Column::col_type_to_string(generated->generate_type()),
+                                generated->generated_kind_string());
   } else if (column->type_ == Column::BLOB) {
     const auto *blob = static_cast<const Blob_Column *>(column);
     copy = new Blob_Column(column->name_, owner, blob->sub_type);
@@ -1029,9 +1035,28 @@ static bool pg_server_at_least(Thd1 *thd, int major) {
          PQserverVersion(thd->conn) >= major * 10000;
 }
 
+static bool current_server_at_least(int major) {
+  return g_server_version_num >= major * 10000;
+}
+
+static std::string normalized_generated_column_kind() {
+  auto kind = opt_string(GENERATED_COLUMN_KIND);
+  std::transform(kind.begin(), kind.end(), kind.begin(), ::tolower);
+  if (kind != "random" && kind != "virtual" && kind != "stored")
+    throw std::runtime_error(
+        "invalid --generated-column-kind. Choose random, virtual, or stored");
+  if (!current_server_at_least(18))
+    return "stored";
+  if (kind == "random")
+    return rand_int(1) == 0 ? "virtual" : "stored";
+  return kind;
+}
+
 /* return probabality of all options and disable some feature based on user
  * request/ branch/ fork */
 int sum_of_all_options(Thd1 *thd) {
+  g_server_version_num =
+      thd != nullptr && thd->conn != nullptr ? PQserverVersion(thd->conn) : 0;
   options->at(Option::ADD_DROP_PARTITION)->setInt(0);
   options->at(Option::DROP_COLUMN)->setInt(0);
   options->at(Option::ALTER_COLUMN_MODIFY)->setInt(0);
@@ -2586,17 +2611,23 @@ static std::string pg_generated_text_term(const Column *col, int limit,
 
 /* Constructor used for load metadata */
 Generated_Column::Generated_Column(std::string name, Table *table,
-                                   std::string clause, std::string sub_type)
+                                   std::string clause, std::string sub_type,
+                                   std::string generated_kind_arg)
     : Column(table, Column::GENERATED) {
   name_ = name;
   str = clause;
   g_type = Column::col_type(sub_type);
+  std::transform(generated_kind_arg.begin(), generated_kind_arg.end(),
+                 generated_kind_arg.begin(), ::tolower);
+  generated_kind = generated_kind_arg == "virtual" ? VIRTUAL : STORED;
 }
 
 /* Generated column constructor. lock table before calling */
 Generated_Column::Generated_Column(std::string name, Table *table)
     : Column(table, Column::GENERATED) {
   name_ = "g" + name;
+  auto generated_kind_clause = normalized_generated_column_kind();
+  generated_kind = generated_kind_clause == "virtual" ? VIRTUAL : STORED;
   auto blob_supported = !options->at(Option::NO_BLOB)->getBool();
   g_type = COLUMN_MAX;
   /* Generated columns keep to stable scalar/text results. */
@@ -2661,7 +2692,7 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     } else {
       str += "(" + sum_expr + ")::NUMERIC";
     }
-    str += ") STORED";
+    str += ") " + std::string(generated_kind == VIRTUAL ? "VIRTUAL" : "STORED");
     return;
   } else if (g_type == VARCHAR || g_type == CHAR || g_type == BLOB) {
     auto size = rand_int(k_generated_text_budget_max, k_generated_text_budget_min);
@@ -2696,7 +2727,7 @@ Generated_Column::Generated_Column(std::string name, Table *table)
     if (g_type == VARCHAR || g_type == CHAR)
       str += ")::" + col_type_to_string(g_type) + "(" +
              std::to_string(actual_size) + ")";
-    str += ") STORED";
+    str += ") " + std::string(generated_kind == VIRTUAL ? "VIRTUAL" : "STORED");
     length = actual_size;
     return;
   } else {
@@ -2739,6 +2770,9 @@ void Generated_Column::Serialize(Writer &writer) const {
   writer.String(type.c_str(), static_cast<SizeType>(type.length()));
   writer.String("clause");
   writer.String(str.c_str(), static_cast<SizeType>(str.length()));
+  writer.String("generated_kind");
+  auto kind = generated_kind_string();
+  writer.String(kind.c_str(), static_cast<SizeType>(kind.length()));
 }
 
 template <typename Writer> void Ind_col::Serialize(Writer &writer) const {
@@ -6355,7 +6389,9 @@ static std::string load_metadata_from_file() {
         auto name = col["name"].GetString();
         auto clause = col["clause"].GetString();
         auto sub_type = col["sub_type"].GetString();
-        a = new Generated_Column(name, table, clause, sub_type);
+        auto generated_kind =
+            metadata_string_member(col, "generated_kind", nullptr, "stored");
+        a = new Generated_Column(name, table, clause, sub_type, generated_kind);
       } else if (type.compare("BLOB") == 0 || type.compare("TEXT") == 0) {
         auto sub_type = col["sub_type"].GetString();
         a = new Blob_Column(col["name"].GetString(), table, sub_type);

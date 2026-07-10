@@ -219,6 +219,10 @@ string_choice_for_option() {
       local choices=("all" "LIST" "HASH" "KEY" "RANGE" "LIST,HASH" "HASH,RANGE" "LIST,RANGE,KEY")
       printf '%s' "${choices[$(( RANDOM % ${#choices[@]} ))]}"
       ;;
+    generated-column-kind)
+      local choices=("random" "virtual" "stored")
+      printf '%s' "${choices[$(( RANDOM % ${#choices[@]} ))]}"
+      ;;
     grammar-file)
       printf '%s' "${REPO_ROOT}/src/grammar.sql"
       ;;

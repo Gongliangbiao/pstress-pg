@@ -151,13 +151,14 @@ struct Blob_Column : public Column {
 };
 
 struct Generated_Column : public Column {
+  enum GENERATED_KIND { VIRTUAL, STORED };
 
   /* constructor for new random generated column */
   Generated_Column(std::string name, Table *table);
 
   /* constructor used to prepare metadata */
   Generated_Column(std::string name, Table *table, std::string clause,
-                   std::string sub_type);
+                   std::string sub_type, std::string generated_kind = "stored");
 
   template <typename Writer> void Serialize(Writer &writer) const;
 
@@ -166,7 +167,11 @@ struct Generated_Column : public Column {
   std::string rand_value();
   ~Generated_Column(){};
   COLUMN_TYPES g_type; // sub type can be blob,int, varchar
+  GENERATED_KIND generated_kind = STORED;
   COLUMN_TYPES generate_type() const { return g_type; };
+  std::string generated_kind_string() const {
+    return generated_kind == VIRTUAL ? "virtual" : "stored";
+  };
 };
 
 struct Ind_col {

@@ -42,6 +42,7 @@ struct Option {
     ONLY_CL_SQL,
     NO_BLOB,
     NO_VIRTUAL_COLUMNS,
+    GENERATED_COLUMN_KIND,
     TABLES,
     INDEXES,
     ALGORITHM,

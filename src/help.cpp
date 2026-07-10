@@ -67,6 +67,11 @@ void add_options() {
   opt->setBool(false);
   opt->setArgs(no_argument);
 
+  opt = newOption(Option::STRING, Option::GENERATED_COLUMN_KIND,
+                  "generated-column-kind");
+  opt->help = "generated column kind: random, virtual, or stored. virtual needs PostgreSQL 18+";
+  opt->setString("random");
+
   /* disable blob,text columns*/
   opt = newOption(Option::BOOL, Option::NO_BLOB, "no-blob");
   opt->help = "Disable blob columns";
