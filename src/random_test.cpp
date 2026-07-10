@@ -1052,6 +1052,11 @@ static std::string normalized_generated_column_kind() {
   return kind;
 }
 
+static bool use_returning_old_new() {
+  auto probability = opt_int(RETURNING_OLD_NEW);
+  return probability > 0 && rand_int(100) < probability;
+}
+
 /* return probabality of all options and disable some feature based on user
  * request/ branch/ fork */
 int sum_of_all_options(Thd1 *thd) {
@@ -1093,8 +1098,10 @@ int sum_of_all_options(Thd1 *thd) {
         "invalid range for --max-partition. Choose between 1 and 8192");
   ;
 
-  if (!pg_server_at_least(thd, 18))
+  if (!pg_server_at_least(thd, 18)) {
+    options->at(Option::RETURNING_OLD_NEW)->setInt(0);
     options->at(Option::PG18_FUNCTIONS)->setInt(0);
+  }
 
   auto lock = opt_string(LOCK);
   if (lock.compare("all") == 0) {
@@ -5695,6 +5702,8 @@ void Table::DeleteRandomRow(Thd1 *thd) {
       predicate += " = " + columns_->at(where)->rand_value();
   }
   sql += " WHERE " + predicate;
+  if (use_returning_old_new())
+    sql += " RETURNING old.*";
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -5768,6 +5777,8 @@ void Table::UpdateRandomROW(Thd1 *thd) {
                   columns_->at(where)->rand_value();
   }
   sql += predicate;
+  if (use_returning_old_new())
+    sql += " RETURNING old.*, new.*";
 
   table_mutex.unlock();
   execute_sql(sql, thd);
@@ -5930,6 +5941,8 @@ void Table::InsertRandomRow(Thd1 *thd) {
       }
     }
   }
+  if (use_returning_old_new())
+    sql += " RETURNING old.*, new.*";
 
   table_mutex.unlock();
   if (execute_sql(sql, thd)) {

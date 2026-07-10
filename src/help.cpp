@@ -267,6 +267,10 @@ void add_options() {
   opt->setSQL();
   opt->setDDL();
 
+  opt = newOption(Option::INT, Option::RETURNING_OLD_NEW, "returning-old-new");
+  opt->help = "probability to add PostgreSQL 18 RETURNING old/new to DML";
+  opt->setInt(5);
+
   opt = newOption(Option::INT, Option::PG18_FUNCTIONS, "pg18-functions");
   opt->help = "run PostgreSQL 18 built-in function queries";
   opt->setInt(5);

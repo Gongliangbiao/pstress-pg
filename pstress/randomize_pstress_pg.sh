@@ -314,7 +314,7 @@ emit_curated_int() {
     vacuum|vacuum-full|checkpoint|create-index-concurrently|reindex|cluster-table|brin-expression-index|create-matview|refresh-matview-concurrently|select-matview|drop-matview|prepared-tx-stress)
       add_param "$option" "$(rand_int_range 0 50)"
       ;;
-    pg18-functions)
+    returning-old-new|pg18-functions)
       add_param "$option" "$(rand_int_range 0 50)"
       ;;
     max-partitions)
