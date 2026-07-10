@@ -6321,7 +6321,21 @@ static void pg18_functions(Thd1 *thd) {
       "SELECT gamma(5.0), lgamma(5.0)",
       "SELECT jsonb_strip_nulls('{\"a\": null, \"b\": [1, null], "
       "\"c\": {\"d\": null}}'::jsonb, true)",
-      "SELECT EXTRACT(WEEK FROM TIMESTAMP '2026-01-05')"};
+      "SELECT EXTRACT(WEEK FROM TIMESTAMP '2026-01-05')",
+      "SELECT backend_type, object, context, reads, read_bytes, writes, "
+      "write_bytes FROM pg_stat_get_backend_io(pg_backend_pid()) LIMIT 8",
+      "SELECT wal_records, wal_fpi, wal_bytes FROM "
+      "pg_stat_get_backend_wal(pg_backend_pid())",
+      "SELECT pid, io_id, state, operation FROM pg_get_aios() LIMIT 8",
+      "SELECT module_name, version FROM pg_get_loaded_modules() LIMIT 8",
+      "SELECT type, name FROM pg_get_wait_events() LIMIT 16",
+      "SELECT * FROM pg_get_wal_summarizer_state()",
+      "SELECT name, level, total_bytes, used_bytes FROM "
+      "pg_backend_memory_contexts LIMIT 16",
+      "SELECT backend_type, object, context, read_bytes, write_bytes, "
+      "extend_bytes FROM pg_stat_io LIMIT 16",
+      "SELECT num_done, restartpoints_done, slru_written FROM "
+      "pg_stat_checkpointer"};
 
   execute_sql(sqls.at(rand_int(sqls.size() - 1)), thd);
 }

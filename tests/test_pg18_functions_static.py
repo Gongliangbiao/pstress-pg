@@ -38,6 +38,15 @@ class Pg18FunctionsStaticTest(unittest.TestCase):
             "lgamma",
             "jsonb_strip_nulls",
             "EXTRACT(WEEK",
+            "pg_stat_get_backend_io",
+            "pg_stat_get_backend_wal",
+            "pg_get_aios",
+            "pg_get_loaded_modules",
+            "pg_get_wait_events",
+            "pg_get_wal_summarizer_state",
+            "pg_backend_memory_contexts",
+            "pg_stat_io",
+            "pg_stat_checkpointer",
         ]:
             self.assertIn(sql_fragment, self.source)
 
