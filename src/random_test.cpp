@@ -1144,6 +1144,7 @@ int sum_of_all_options(Thd1 *thd) {
     options->at(Option::RETURNING_OLD_NEW)->setInt(0);
     options->at(Option::PG18_NOT_NULL_CONSTRAINT)->setInt(0);
     options->at(Option::PG18_TEMPORAL_CONSTRAINTS)->setInt(0);
+    options->at(Option::PG18_PARTITION_FK_NOT_VALID)->setInt(0);
     options->at(Option::PG18_COPY)->setInt(0);
     options->at(Option::PG18_MERGE)->setInt(0);
     options->at(Option::PG18_PARTITION_OPS)->setInt(0);
@@ -6616,6 +6617,92 @@ static void pg18_temporal_constraints(Thd1 *thd) {
   }
 }
 
+static void pg18_partition_fk_not_valid(Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18))
+    return;
+
+  auto suffix = std::to_string(thd->thread_id) + "_" +
+                std::to_string(++pg18_temporal_table_seq);
+  auto parent = "pg18_fk_nv_pstress_parent_" + suffix;
+  auto parent_part = parent + "_p0";
+  auto child = "pg18_fk_nv_pstress_child_" + suffix;
+  auto child_part = child + "_p0";
+  auto constraint = "pg18_fk_nv_pstress_fk_" + suffix;
+  auto mode = rand_int(2);
+
+  auto cleanup = [&]() {
+    execute_sql("DROP TABLE IF EXISTS " + child + " CASCADE", thd);
+    execute_sql("DROP TABLE IF EXISTS " + parent + " CASCADE", thd);
+  };
+
+  if (mode == 0) {
+    if (!execute_sql("CREATE TABLE " + parent + "(id INT PRIMARY KEY)", thd))
+      return;
+    if (!execute_sql("CREATE TABLE " + child +
+                         "(id INT, parent_id INT) PARTITION BY RANGE (id)",
+                     thd)) {
+      cleanup();
+      return;
+    }
+    if (!execute_sql("CREATE TABLE " + child_part + " PARTITION OF " + child +
+                         " FOR VALUES FROM (0) TO (1000000)",
+                     thd)) {
+      cleanup();
+      return;
+    }
+    execute_sql("ALTER TABLE " + child + " ADD CONSTRAINT " + constraint +
+                    " FOREIGN KEY (parent_id) REFERENCES " + parent +
+                    "(id) NOT VALID",
+                thd);
+    if (rand_int(1) == 0)
+      execute_sql("ALTER TABLE " + child + " VALIDATE CONSTRAINT " + constraint,
+                  thd);
+    cleanup();
+    return;
+  }
+
+  if (!execute_sql("CREATE TABLE " + parent +
+                       "(id INT PRIMARY KEY) PARTITION BY RANGE (id)",
+                   thd))
+    return;
+  if (!execute_sql("CREATE TABLE " + parent_part + " PARTITION OF " + parent +
+                       " FOR VALUES FROM (0) TO (1000000)",
+                   thd)) {
+    cleanup();
+    return;
+  }
+
+  if (mode == 1) {
+    if (!execute_sql("CREATE TABLE " + child + "(id INT PRIMARY KEY, parent_id INT)",
+                     thd)) {
+      cleanup();
+      return;
+    }
+  } else {
+    if (!execute_sql("CREATE TABLE " + child +
+                         "(id INT, parent_id INT) PARTITION BY RANGE (id)",
+                     thd)) {
+      cleanup();
+      return;
+    }
+    if (!execute_sql("CREATE TABLE " + child_part + " PARTITION OF " + child +
+                         " FOR VALUES FROM (0) TO (1000000)",
+                     thd)) {
+      cleanup();
+      return;
+    }
+  }
+
+  execute_sql("ALTER TABLE " + child + " ADD CONSTRAINT " + constraint +
+                  " FOREIGN KEY (parent_id) REFERENCES " + parent +
+                  "(id) NOT VALID",
+              thd);
+  if (rand_int(1) == 0)
+    execute_sql("ALTER TABLE " + child + " VALIDATE CONSTRAINT " + constraint,
+                thd);
+  cleanup();
+}
+
 static void pg18_merge(Table *table, Thd1 *thd) {
   if (!pg_server_at_least(thd, 18) || table == nullptr)
     return;
@@ -7471,6 +7558,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::PG18_TEMPORAL_CONSTRAINTS:
       pg18_temporal_constraints(this);
+      break;
+    case Option::PG18_PARTITION_FK_NOT_VALID:
+      pg18_partition_fk_not_valid(this);
       break;
     case Option::PG18_MERGE:
       pg18_merge(table, this);

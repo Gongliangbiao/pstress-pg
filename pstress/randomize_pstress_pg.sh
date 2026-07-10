@@ -319,7 +319,7 @@ emit_curated_int() {
     modify-column|check|add-drop-partition|drop-column|add-column|drop-index|add-index|rename-column|rename-index|optimize|analyze|truncate|recreate-table|grammar-sql)
       add_param "$option" "$(rand_int_range 0 50)"
       ;;
-    vacuum|vacuum-full|checkpoint|create-index-concurrently|reindex|cluster-table|brin-expression-index|gist-index|create-matview|refresh-matview-concurrently|select-matview|drop-matview|prepared-tx-stress|pg18-not-null-constraint|pg18-temporal-constraints|pg18-partition-ops)
+    vacuum|vacuum-full|checkpoint|create-index-concurrently|reindex|cluster-table|brin-expression-index|gist-index|create-matview|refresh-matview-concurrently|select-matview|drop-matview|prepared-tx-stress|pg18-not-null-constraint|pg18-temporal-constraints|pg18-partition-fk-not-valid|pg18-partition-ops)
       add_param "$option" "$(rand_int_range 0 50)"
       ;;
     pg18-vacuum-analyze-only|returning-old-new|pg18-merge|pg18-copy|pg18-explain|pg18-functions)
