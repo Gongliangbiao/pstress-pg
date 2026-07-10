@@ -53,6 +53,7 @@ std::atomic_flag lock_stream = ATOMIC_FLAG_INIT;
 std::atomic<bool> run_query_failed(false);
 std::mutex ddl_workload_mutex;
 std::atomic<unsigned long long> trx_ddl_table_seq(0);
+std::atomic<unsigned long long> pg18_temporal_table_seq(0);
 static constexpr size_t k_transactional_ddl_existing_column_cap = 256;
 /* partition type supported by system */
 std::vector<Partition::PART_TYPE> Partition::supported;
@@ -1141,6 +1142,7 @@ int sum_of_all_options(Thd1 *thd) {
     options->at(Option::PG18_VACUUM_ANALYZE_ONLY)->setInt(0);
     options->at(Option::RETURNING_OLD_NEW)->setInt(0);
     options->at(Option::PG18_NOT_NULL_CONSTRAINT)->setInt(0);
+    options->at(Option::PG18_TEMPORAL_CONSTRAINTS)->setInt(0);
     options->at(Option::PG18_COPY)->setInt(0);
     options->at(Option::PG18_EXPLAIN)->setInt(0);
     options->at(Option::PG18_FUNCTIONS)->setInt(0);
@@ -6472,6 +6474,98 @@ static void pg18_not_null_constraint(Table *table, Thd1 *thd) {
   execute_sql(sql, thd);
 }
 
+static std::string pick_pg18_temporal_parent(Thd1 *thd) {
+  PGresult *result = PQexec(
+      thd->conn,
+      "SELECT relname FROM pg_class c "
+      "JOIN pg_namespace n ON n.oid = c.relnamespace "
+      "WHERE n.nspname = current_schema() "
+      "AND c.relkind = 'r' "
+      "AND c.relname LIKE 'temporal_pstress_%' "
+      "AND c.relname NOT LIKE '%_child' "
+      "ORDER BY random() LIMIT 1");
+  if (result == nullptr || PQresultStatus(result) != PGRES_TUPLES_OK ||
+      PQntuples(result) == 0) {
+    if (result != nullptr)
+      PQclear(result);
+    return "";
+  }
+  std::string name = PQgetvalue(result, 0, 0);
+  PQclear(result);
+  return name;
+}
+
+static void pg18_create_temporal_constraints(Thd1 *thd) {
+  auto suffix = std::to_string(thd->thread_id) + "_" +
+                std::to_string(++pg18_temporal_table_seq);
+  auto parent = "temporal_pstress_" + suffix;
+  auto child = parent + "_child";
+
+  execute_sql("CREATE EXTENSION IF NOT EXISTS btree_gist", thd);
+  if (thd->connection_lost || run_query_failed)
+    return;
+
+  auto parent_sql =
+      "CREATE TABLE " + parent +
+      "(id INT, valid_at DATERANGE NOT NULL, payload INT, "
+      "PRIMARY KEY (id, valid_at WITHOUT OVERLAPS))";
+  if (!execute_sql(parent_sql, thd))
+    return;
+
+  auto child_sql =
+      "CREATE TABLE " + child +
+      "(id INT, parent_id INT, valid_at DATERANGE NOT NULL, payload INT, "
+      "FOREIGN KEY (parent_id, PERIOD valid_at) REFERENCES " + parent +
+      "(id, PERIOD valid_at))";
+  execute_sql(child_sql, thd);
+}
+
+static void pg18_insert_temporal_constraints(const std::string &parent,
+                                             Thd1 *thd) {
+  auto id = rand_int(100000000, 1);
+  auto day = rand_int(300, 1);
+  auto child = parent + "_child";
+  auto parent_range = "daterange((DATE '2026-01-01' + " +
+                      std::to_string(day) + "), (DATE '2026-01-01' + " +
+                      std::to_string(day + 20) + "), '[)')";
+  auto child_range = "daterange((DATE '2026-01-01' + " +
+                     std::to_string(day + 1) + "), (DATE '2026-01-01' + " +
+                     std::to_string(day + 10) + "), '[)')";
+
+  if (!execute_sql("INSERT INTO " + parent + " VALUES (" +
+                       std::to_string(id) + ", " + parent_range + ", " +
+                       std::to_string(rand_int(1000)) + ")",
+                   thd))
+    return;
+  execute_sql("INSERT INTO " + child + " VALUES (" + std::to_string(id) +
+                  ", " + std::to_string(id) + ", " + child_range + ", " +
+                  std::to_string(rand_int(1000)) + ")",
+              thd);
+}
+
+static void pg18_temporal_constraints(Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18))
+    return;
+
+  auto action = rand_int(3);
+  auto parent = pick_pg18_temporal_parent(thd);
+  if (parent.empty() || action == 0) {
+    pg18_create_temporal_constraints(thd);
+    return;
+  }
+
+  if (action == 1) {
+    pg18_insert_temporal_constraints(parent, thd);
+  } else if (action == 2) {
+    execute_sql("SELECT p.id, p.valid_at, c.valid_at FROM " + parent +
+                    " p JOIN " + parent + "_child c ON p.id = c.parent_id "
+                    "WHERE p.valid_at @> lower(c.valid_at) LIMIT 16",
+                thd);
+  } else {
+    execute_sql("DROP TABLE " + parent + " CASCADE", thd);
+  }
+}
+
 static std::string pg18_copy_base_source(Table *table,
                                          int partition_child_probability = 10) {
   if (table == nullptr)
@@ -7215,6 +7309,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::PG18_NOT_NULL_CONSTRAINT:
       pg18_not_null_constraint(table, this);
+      break;
+    case Option::PG18_TEMPORAL_CONSTRAINTS:
+      pg18_temporal_constraints(this);
       break;
     case Option::PG18_COPY:
       pg18_copy(table, this);

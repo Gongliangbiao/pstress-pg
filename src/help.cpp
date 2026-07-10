@@ -279,6 +279,13 @@ void add_options() {
   opt->setSQL();
   opt->setDDL();
 
+  opt = newOption(Option::INT, Option::PG18_TEMPORAL_CONSTRAINTS,
+                  "pg18-temporal-constraints");
+  opt->help = "run PostgreSQL 18 temporal WITHOUT OVERLAPS and PERIOD DDL";
+  opt->setInt(5);
+  opt->setSQL();
+  opt->setDDL();
+
   opt = newOption(Option::INT, Option::RETURNING_OLD_NEW, "returning-old-new");
   opt->help = "probability to add PostgreSQL 18 RETURNING old/new to DML";
   opt->setInt(5);
