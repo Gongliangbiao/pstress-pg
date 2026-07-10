@@ -1057,6 +1057,16 @@ static bool use_returning_old_new() {
   return probability > 0 && rand_int(100) < probability;
 }
 
+static std::string pg18_vacuum_analyze_target(Table *table) {
+  auto target = table->type == Table::PARTITION ? pg_partition_target(table)
+                                                : table->name_;
+  if (options->at(Option::PG18_VACUUM_ANALYZE_ONLY)->getInt() > 0 &&
+      rand_int(100) <
+          options->at(Option::PG18_VACUUM_ANALYZE_ONLY)->getInt())
+    return "ONLY " + target;
+  return target;
+}
+
 static std::string normalized_pg18_copy_mode() {
   auto mode = opt_string(PG18_COPY_MODE);
   std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
@@ -1128,6 +1138,7 @@ int sum_of_all_options(Thd1 *thd) {
   ;
 
   if (!pg_server_at_least(thd, 18)) {
+    options->at(Option::PG18_VACUUM_ANALYZE_ONLY)->setInt(0);
     options->at(Option::RETURNING_OLD_NEW)->setInt(0);
     options->at(Option::PG18_COPY)->setInt(0);
     options->at(Option::PG18_EXPLAIN)->setInt(0);
@@ -4092,13 +4103,11 @@ void Table::DropCreate(Thd1 *thd) {
 }
 
 void Table::Optimize(Thd1 *thd) {
-  execute_sql("ANALYZE " + (type == PARTITION ? pg_partition_target(this) : name_),
-              thd);
+  execute_sql("ANALYZE " + pg18_vacuum_analyze_target(this), thd);
 }
 
 void Table::Vacuum(Thd1 *thd) {
-  execute_sql("VACUUM " + (type == PARTITION ? pg_partition_target(this) : name_),
-              thd);
+  execute_sql("VACUUM " + pg18_vacuum_analyze_target(this), thd);
 }
 
 void Table::VacuumFull(Thd1 *thd) {
@@ -4123,8 +4132,7 @@ void Table::Check(Thd1 *thd) {
 }
 
 void Table::Analyze(Thd1 *thd) {
-  execute_sql("ANALYZE " + (type == PARTITION ? pg_partition_target(this) : name_),
-              thd);
+  execute_sql("ANALYZE " + pg18_vacuum_analyze_target(this), thd);
 }
 
 void Table::Truncate(Thd1 *thd) {

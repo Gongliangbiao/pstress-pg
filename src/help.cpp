@@ -192,6 +192,11 @@ void add_options() {
   opt->help = "Probability of unlogged tables";
   opt->setInt(10);
 
+  opt = newOption(Option::INT, Option::PG18_VACUUM_ANALYZE_ONLY,
+                  "pg18-vacuum-analyze-only");
+  opt->help = "probability to add PostgreSQL 18 ONLY to VACUUM or ANALYZE";
+  opt->setInt(5);
+
   opt = newOption(Option::INT, Option::VACUUM_TABLE, "vacuum");
   opt->help = "VACUUM table or partition child";
   opt->setInt(3);
