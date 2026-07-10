@@ -264,6 +264,7 @@ struct Table {
   void Reindex(Thd1 *thd);
   void ClusterTable(Thd1 *thd);
   void AddBrinExpressionIndex(Thd1 *thd);
+  void AddGistIndex(Thd1 *thd);
   void SelectMatview(Thd1 *thd);
   void DropMatview(Thd1 *thd);
   void DeleteRandomRow(Thd1 *thd);

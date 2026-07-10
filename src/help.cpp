@@ -241,6 +241,12 @@ void add_options() {
   opt->setSQL();
   opt->setDDL();
 
+  opt = newOption(Option::INT, Option::GIST_INDEX, "gist-index");
+  opt->help = "create GiST index on a random table";
+  opt->setInt(3);
+  opt->setSQL();
+  opt->setDDL();
+
   opt = newOption(Option::INT, Option::CREATE_MATVIEW, "create-matview");
   opt->help = "CREATE MATERIALIZED VIEW from a random table";
   opt->setInt(5);

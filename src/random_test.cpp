@@ -54,6 +54,7 @@ std::atomic<bool> run_query_failed(false);
 std::mutex ddl_workload_mutex;
 std::atomic<unsigned long long> trx_ddl_table_seq(0);
 std::atomic<unsigned long long> pg18_temporal_table_seq(0);
+std::atomic<unsigned long long> gist_index_seq(0);
 static constexpr size_t k_transactional_ddl_existing_column_cap = 256;
 /* partition type supported by system */
 std::vector<Partition::PART_TYPE> Partition::supported;
@@ -5791,6 +5792,39 @@ void Table::AddBrinExpressionIndex(Thd1 *thd) {
     execute_sql(sql, thd);
 }
 
+void Table::AddGistIndex(Thd1 *thd) {
+  table_mutex.lock();
+  std::vector<int> candidates;
+  for (size_t i = 0; i < columns_->size(); ++i) {
+    auto *col = columns_->at(i);
+    if (col->type_ == Column::POINT || col->type_ == Column::BOX ||
+        col->type_ == Column::CIRCLE || col->type_ == Column::INET ||
+        col->type_ == Column::CIDR || col->type_ == Column::INT4RANGE ||
+        col->type_ == Column::INT8RANGE || col->type_ == Column::NUMRANGE ||
+        col->type_ == Column::TSRANGE || col->type_ == Column::TSTZRANGE ||
+        col->type_ == Column::DATERANGE) {
+      candidates.push_back(static_cast<int>(i));
+    }
+  }
+
+  if (candidates.empty()) {
+    table_mutex.unlock();
+    return;
+  }
+
+  auto *col = columns_->at(candidates.at(rand_int(candidates.size() - 1)));
+  std::string idx_name =
+      "gist_" + name_ + "_" + col->name_ + "_" +
+      std::to_string(thd->thread_id) + "_" + std::to_string(++gist_index_seq);
+  std::string opclass =
+      (col->type_ == Column::INET || col->type_ == Column::CIDR) ? " inet_ops" : "";
+  auto sql = "CREATE INDEX " + idx_name + " ON " + name_ +
+             " USING gist (" + col->name_ + opclass + ")";
+  table_mutex.unlock();
+
+  execute_sql(sql, thd);
+}
+
 void Table::DeleteAllRows(Thd1 *thd) {
   std::string sql = "DELETE FROM " + name_;
   if (type == PARTITION && rand_int(100) < 98) {
@@ -7413,6 +7447,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::BRIN_EXPRESSION_INDEX:
       table->AddBrinExpressionIndex(this);
+      break;
+    case Option::GIST_INDEX:
+      table->AddGistIndex(this);
       break;
     case Option::CREATE_MATVIEW:
       create_matview(table, this);
