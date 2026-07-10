@@ -271,6 +271,25 @@ void add_options() {
   opt->help = "probability to add PostgreSQL 18 RETURNING old/new to DML";
   opt->setInt(5);
 
+  opt = newOption(Option::INT, Option::PG18_COPY, "pg18-copy");
+  opt->help = "run PostgreSQL 18 COPY workloads";
+  opt->setInt(5);
+  opt->setSQL();
+
+  opt = newOption(Option::STRING, Option::PG18_COPY_MODE, "pg18-copy-mode");
+  opt->help = "PostgreSQL 18 COPY mode: random, from-stdin, to-stdout, query-to-stdout, or matview-to-stdout";
+  opt->setString("random");
+
+  opt = newOption(Option::INT, Option::PG18_COPY_REJECT_LIMIT,
+                  "pg18-copy-reject-limit");
+  opt->help = "REJECT_LIMIT for PostgreSQL 18 COPY FROM ON_ERROR ignore";
+  opt->setInt(10);
+
+  opt = newOption(Option::STRING, Option::PG18_COPY_LOG_VERBOSITY,
+                  "pg18-copy-log-verbosity");
+  opt->help = "PostgreSQL 18 COPY LOG_VERBOSITY: random, default, verbose, or silent";
+  opt->setString("random");
+
   opt = newOption(Option::INT, Option::PG18_EXPLAIN, "pg18-explain");
   opt->help = "run PostgreSQL 18 EXPLAIN queries with MEMORY, SERIALIZE, or WAL";
   opt->setInt(5);

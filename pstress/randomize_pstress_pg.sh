@@ -223,6 +223,14 @@ string_choice_for_option() {
       local choices=("random" "virtual" "stored")
       printf '%s' "${choices[$(( RANDOM % ${#choices[@]} ))]}"
       ;;
+    pg18-copy-mode)
+      local choices=("random" "from-stdin" "to-stdout" "query-to-stdout" "matview-to-stdout")
+      printf '%s' "${choices[$(( RANDOM % ${#choices[@]} ))]}"
+      ;;
+    pg18-copy-log-verbosity)
+      local choices=("random" "default" "verbose" "silent")
+      printf '%s' "${choices[$(( RANDOM % ${#choices[@]} ))]}"
+      ;;
     grammar-file)
       printf '%s' "${REPO_ROOT}/src/grammar.sql"
       ;;
@@ -314,8 +322,11 @@ emit_curated_int() {
     vacuum|vacuum-full|checkpoint|create-index-concurrently|reindex|cluster-table|brin-expression-index|create-matview|refresh-matview-concurrently|select-matview|drop-matview|prepared-tx-stress)
       add_param "$option" "$(rand_int_range 0 50)"
       ;;
-    returning-old-new|pg18-explain|pg18-functions)
+    returning-old-new|pg18-copy|pg18-explain|pg18-functions)
       add_param "$option" "$(rand_int_range 0 50)"
+      ;;
+    pg18-copy-reject-limit)
+      add_param "$option" "$(rand_int_range 1 100)"
       ;;
     max-partitions)
       add_param "$option" "$(rand_int_range 1 128)"

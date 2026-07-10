@@ -217,6 +217,7 @@ struct Thd1 {
   bool ddl_query = false;     // is the query ddl
   bool success = false;       // if the sql is successfully executed
   bool connection_lost = false; // current thread lost its backend connection
+  bool copy_staging_created = false; // temp COPY FROM STDIN table is ready
   int max_con_fail_count = 0; // consecutive failed queries
 
   /* for loading Bulkdata, Primary key of current table is stored in this vector

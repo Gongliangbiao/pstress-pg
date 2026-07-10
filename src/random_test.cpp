@@ -1057,6 +1057,35 @@ static bool use_returning_old_new() {
   return probability > 0 && rand_int(100) < probability;
 }
 
+static std::string normalized_pg18_copy_mode() {
+  auto mode = opt_string(PG18_COPY_MODE);
+  std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+  if (mode != "random" && mode != "from-stdin" && mode != "to-stdout" &&
+      mode != "query-to-stdout" && mode != "matview-to-stdout")
+    throw std::runtime_error(
+        "invalid --pg18-copy-mode. Choose random, from-stdin, to-stdout, "
+        "query-to-stdout, or matview-to-stdout");
+  if (mode != "random")
+    return mode;
+  static const std::vector<std::string> modes = {
+      "from-stdin", "to-stdout", "query-to-stdout", "matview-to-stdout"};
+  return modes.at(rand_int(modes.size() - 1));
+}
+
+static std::string normalized_pg18_copy_log_verbosity() {
+  auto verbosity = opt_string(PG18_COPY_LOG_VERBOSITY);
+  std::transform(verbosity.begin(), verbosity.end(), verbosity.begin(), ::tolower);
+  if (verbosity != "random" && verbosity != "default" &&
+      verbosity != "verbose" && verbosity != "silent")
+    throw std::runtime_error(
+        "invalid --pg18-copy-log-verbosity. Choose random, default, verbose, "
+        "or silent");
+  if (verbosity != "random")
+    return verbosity;
+  static const std::vector<std::string> choices = {"default", "verbose", "silent"};
+  return choices.at(rand_int(choices.size() - 1));
+}
+
 /* return probabality of all options and disable some feature based on user
  * request/ branch/ fork */
 int sum_of_all_options(Thd1 *thd) {
@@ -1100,6 +1129,7 @@ int sum_of_all_options(Thd1 *thd) {
 
   if (!pg_server_at_least(thd, 18)) {
     options->at(Option::RETURNING_OLD_NEW)->setInt(0);
+    options->at(Option::PG18_COPY)->setInt(0);
     options->at(Option::PG18_EXPLAIN)->setInt(0);
     options->at(Option::PG18_FUNCTIONS)->setInt(0);
   }
@@ -3575,6 +3605,10 @@ static int pick_random_where_column(const Table *table, bool prefer_primary_key)
 static std::string random_read_source(Table *table,
                                       int partition_child_probability = 10) {
   if (table != nullptr && table->type == Table::PARTITION &&
+      partition_child_probability >= 100) {
+    return pg_partition_target(table);
+  }
+  if (table != nullptr && table->type == Table::PARTITION &&
       rand_int(100) < partition_child_probability) {
     return pg_partition_target(table);
   }
@@ -4904,6 +4938,163 @@ bool execute_sql(const std::string &sql, Thd1 *thd) {
   return query_success;
 }
 
+static void log_query_duration_prefix(Thd1 *thd,
+                                      std::chrono::system_clock::time_point begin,
+                                      std::chrono::system_clock::time_point end) {
+  auto te_start = std::chrono::duration_cast<std::chrono::microseconds>(
+      begin - start_time);
+  auto te_query =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - begin);
+  auto in_time_t = std::chrono::system_clock::to_time_t(begin);
+
+  std::stringstream ss;
+  ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%dT%X");
+
+  thd->thread_log << ss.str() << " " << te_start.count() << "=>"
+                  << te_query.count() << "ms ";
+}
+
+static bool finish_copy_query_log(const std::string &sql, Thd1 *thd,
+                                  PGresult *result, bool query_success,
+                                  long long rows) {
+  static auto log_all = opt_bool(LOG_ALL_QUERIES);
+  static auto log_failed = opt_bool(LOG_FAILED_QUERIES);
+  static auto log_success = opt_bool(LOG_SUCCEDED_QUERIES);
+
+  if (!query_success) {
+    thd->failed_queries_total++;
+    thd->max_con_fail_count++;
+    const char *sqlstate =
+        result ? PQresultErrorField(result, PG_DIAG_SQLSTATE) : nullptr;
+    if (log_all || log_failed) {
+      thd->thread_log << " F " << sql << std::endl;
+      thd->thread_log << "Error code "
+                      << (sqlstate ? sqlstate : "n/a") << " "
+                      << "message "
+                      << (result ? PQresultErrorMessage(result)
+                                 : PQerrorMessage(thd->conn))
+                      << std::endl;
+    }
+    if (is_connection_lost(thd->conn, result)) {
+      thd->thread_log << "connection lost while processing " + sql;
+      if (sqlstate != nullptr)
+        thd->thread_log << " sqlstate=" << sqlstate;
+      thd->thread_log << std::endl;
+      thd->connection_lost = true;
+    }
+    return false;
+  }
+
+  thd->max_con_fail_count = 0;
+  thd->success = true;
+  if (log_all || log_success) {
+    thd->thread_log << " S " << sql << " rows:" << rows << std::endl;
+  }
+  return true;
+}
+
+static bool execute_copy_to_stdout(const std::string &sql, Thd1 *thd) {
+  static auto log_query_duration = opt_bool(LOG_QUERY_DURATION);
+  std::chrono::system_clock::time_point begin, end;
+  if (log_query_duration)
+    begin = std::chrono::system_clock::now();
+
+  thd->success = false;
+  thd->result.reset();
+  PGresult *result = PQexec(thd->conn, sql.c_str());
+  bool query_success =
+      result != nullptr && PQresultStatus(result) == PGRES_COPY_OUT;
+  long long rows = 0;
+
+  if (query_success) {
+    PQclear(result);
+    result = nullptr;
+    char *buffer = nullptr;
+    int copy_status = 0;
+    while ((copy_status = PQgetCopyData(thd->conn, &buffer, 0)) > 0) {
+      rows++;
+      PQfreemem(buffer);
+      buffer = nullptr;
+    }
+    if (copy_status == -2)
+      query_success = false;
+
+    PGresult *copy_result = nullptr;
+    while ((copy_result = PQgetResult(thd->conn)) != nullptr) {
+      if (PQresultStatus(copy_result) != PGRES_COMMAND_OK)
+        query_success = false;
+      PQclear(copy_result);
+    }
+  }
+
+  if (log_query_duration) {
+    end = std::chrono::system_clock::now();
+    log_query_duration_prefix(thd, begin, end);
+  }
+  thd->performed_queries_total++;
+
+  bool ret = finish_copy_query_log(sql, thd, result, query_success, rows);
+  if (result != nullptr)
+    PQclear(result);
+  return ret;
+}
+
+static bool execute_copy_from_stdin(const std::string &sql,
+                                    const std::vector<std::string> &rows,
+                                    Thd1 *thd) {
+  static auto log_query_duration = opt_bool(LOG_QUERY_DURATION);
+  std::chrono::system_clock::time_point begin, end;
+  if (log_query_duration)
+    begin = std::chrono::system_clock::now();
+
+  thd->success = false;
+  thd->result.reset();
+  PGresult *result = PQexec(thd->conn, sql.c_str());
+  bool query_success =
+      result != nullptr && PQresultStatus(result) == PGRES_COPY_IN;
+
+  if (query_success) {
+    PQclear(result);
+    result = nullptr;
+    for (const auto &row : rows) {
+      if (PQputCopyData(thd->conn, row.c_str(), row.size()) != 1) {
+        query_success = false;
+        break;
+      }
+    }
+    if (PQputCopyEnd(thd->conn, nullptr) != 1)
+      query_success = false;
+
+    PGresult *copy_result = nullptr;
+    while ((copy_result = PQgetResult(thd->conn)) != nullptr) {
+      if (PQresultStatus(copy_result) != PGRES_COMMAND_OK)
+        query_success = false;
+      if (result == nullptr)
+        result = copy_result;
+      else
+        PQclear(copy_result);
+    }
+  }
+
+  long long copied_rows = 0;
+  if (query_success && result != nullptr) {
+    auto tuples = PQcmdTuples(result);
+    if (tuples != nullptr && tuples[0] != '\0')
+      copied_rows = std::stoll(tuples);
+  }
+
+  if (log_query_duration) {
+    end = std::chrono::system_clock::now();
+    log_query_duration_prefix(thd, begin, end);
+  }
+  thd->performed_queries_total++;
+
+  bool ret = finish_copy_query_log(sql, thd, result, query_success, copied_rows);
+  if (result != nullptr)
+    PQclear(result);
+  return ret;
+}
+
 // todo pick relevent table//
 void Table::ModifyColumn(Thd1 *thd) {
   Column *col = nullptr;
@@ -6145,6 +6336,84 @@ static void pg18_explain(Table *table, Thd1 *thd) {
   execute_sql(sql, thd);
 }
 
+static std::string pick_pg_matview_name(Thd1 *thd) {
+  PGresult *result = PQexec(
+      thd->conn,
+      "SELECT matviewname FROM pg_matviews "
+      "WHERE schemaname = current_schema() ORDER BY random() LIMIT 1");
+  if (result == nullptr || PQresultStatus(result) != PGRES_TUPLES_OK ||
+      PQntuples(result) == 0) {
+    if (result != nullptr)
+      PQclear(result);
+    return "";
+  }
+  std::string name = PQgetvalue(result, 0, 0);
+  PQclear(result);
+  return name;
+}
+
+static std::string pg18_copy_base_source(Table *table,
+                                         int partition_child_probability = 10) {
+  if (table == nullptr)
+    return "";
+  table->table_mutex.lock();
+  auto source = random_read_source(table, partition_child_probability);
+  table->table_mutex.unlock();
+  return source;
+}
+
+static void pg18_copy(Table *table, Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18) || table == nullptr)
+    return;
+
+  auto mode = normalized_pg18_copy_mode();
+  auto source = pg18_copy_base_source(table, mode == "to-stdout" ? 100 : 10);
+  if (source.empty())
+    return;
+
+  if (mode == "from-stdin") {
+    if (!thd->copy_staging_created) {
+      if (!execute_sql("CREATE TEMP TABLE pstress_copy_staging "
+                       "(v INT, t TEXT) ON COMMIT PRESERVE ROWS",
+                       thd))
+        return;
+      thd->copy_staging_created = true;
+    }
+    auto reject_limit = options->at(Option::PG18_COPY_REJECT_LIMIT)->getInt();
+    reject_limit = std::max(1, reject_limit);
+    auto verbosity = normalized_pg18_copy_log_verbosity();
+    auto sql = "COPY pstress_copy_staging(v, t) FROM STDIN WITH "
+               "(FORMAT csv, ON_ERROR ignore, REJECT_LIMIT " +
+               std::to_string(reject_limit) + ", LOG_VERBOSITY " + verbosity +
+               ")";
+    std::vector<std::string> rows = {"1,copy-ok\n", "bad-int,copy-bad\n",
+                                     "2,copy-ok\n"};
+    execute_copy_from_stdin(sql, rows, thd);
+    return;
+  }
+
+  if (mode == "matview-to-stdout") {
+    auto mv_name = pick_pg_matview_name(thd);
+    if (!mv_name.empty()) {
+      execute_copy_to_stdout("COPY " + mv_name + " TO STDOUT WITH (FORMAT csv)",
+                             thd);
+      return;
+    }
+    mode = "query-to-stdout";
+  }
+
+  if (mode == "to-stdout") {
+    execute_copy_to_stdout("COPY " + source + " TO STDOUT WITH (FORMAT csv)",
+                           thd);
+    return;
+  }
+
+  execute_copy_to_stdout("COPY (SELECT * FROM " + source + " LIMIT " +
+                             std::to_string(rand_int(64, 1)) +
+                             ") TO STDOUT WITH (FORMAT csv)",
+                         thd);
+}
+
 static void create_matview(Table *table, Thd1 *thd) {
   std::string mv_name =
       "mv_" + table->name_ + "_" + std::to_string(rand_int(100000, 1000));
@@ -6823,6 +7092,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::PREPARED_TRANSACTION_STRESS:
       prepared_tx_stress(table, this);
+      break;
+    case Option::PG18_COPY:
+      pg18_copy(table, this);
       break;
     case Option::PG18_EXPLAIN:
       pg18_explain(table, this);
