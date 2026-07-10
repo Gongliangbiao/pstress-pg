@@ -11,26 +11,28 @@ class Pg18FunctionsStaticTest(unittest.TestCase):
         cls.common = (ROOT / "src/common.hpp").read_text()
         cls.help = (ROOT / "src/help.cpp").read_text()
         cls.source = (ROOT / "src/random_test.cpp").read_text()
+        cls.grammar = (ROOT / "src/grammar.sql").read_text()
         cls.randomizer = (ROOT / "pstress/randomize_pstress_pg.sh").read_text()
 
-    def test_pg18_function_option_is_parameterized(self):
-        self.assertIn("PG18_FUNCTIONS", self.common)
-        self.assertIn('"pg18-functions"', self.help)
-        self.assertIn("pg18-functions", self.randomizer)
+    def test_pg18_function_option_is_not_separate_parameter(self):
+        self.assertNotIn("PG18_FUNCTIONS", self.common)
+        self.assertNotIn('"pg18-functions"', self.help)
+        self.assertNotIn("pg18-functions", self.randomizer)
 
-    def test_pg18_function_workload_has_version_gate_and_dispatch(self):
-        self.assertIn("pg_server_at_least(thd, 18)", self.source)
-        self.assertIn("options->at(Option::PG18_FUNCTIONS)->setInt(0)", self.source)
-        self.assertIn("static void pg18_functions(Thd1 *thd)", self.source)
-        self.assertIn("case Option::PG18_FUNCTIONS", self.source)
+    def test_pg18_function_workload_reuses_grammar_sql(self):
+        self.assertIn("pg18_only_grammar_sql", self.source)
+        self.assertIn("if (pg18_only_grammar_sql(sql) && !pg_server_at_least(thd, 18))",
+                      self.source)
+        self.assertNotIn("static void pg18_functions(Thd1 *thd)", self.source)
+        self.assertNotIn("case Option::PG18_FUNCTIONS", self.source)
 
-    def test_pg18_function_queries_are_present(self):
+    def test_pg18_function_queries_are_present_in_grammar_sql(self):
         for sql_fragment in [
             "uuidv7()",
             "uuidv4()",
             "array_sort",
             "array_reverse",
-            "reverse('\\\\\\\\x123456'::bytea)",
+            "reverse('\\\\x123456'::bytea)",
             "casefold",
             "crc32",
             "crc32c",
@@ -48,7 +50,8 @@ class Pg18FunctionsStaticTest(unittest.TestCase):
             "pg_stat_io",
             "pg_stat_checkpointer",
         ]:
-            self.assertIn(sql_fragment, self.source)
+            self.assertIn(sql_fragment, self.grammar)
+        self.assertIn("-- pg18", self.grammar)
 
 
 if __name__ == "__main__":

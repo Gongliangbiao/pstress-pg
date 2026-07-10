@@ -23,7 +23,6 @@
 | `--pg18-copy-reject-limit` | `10` | `COPY FROM` 使用 `ON_ERROR ignore` 时的 `REJECT_LIMIT`。 |
 | `--pg18-copy-log-verbosity` | `random` | `COPY` 日志详细度，支持 `random`、`default`、`verbose`、`silent`。 |
 | `--pg18-explain` | `5` | 覆盖 PostgreSQL 18 `EXPLAIN` 选项，如 `MEMORY`、`SERIALIZE`、`WAL`。 |
-| `--pg18-functions` | `5` | 覆盖 PostgreSQL 18 新增或增强的内置函数、统计函数和系统视图。 |
 | `--gist-index` | `3` | 对适合 GiST 的列生成 `USING gist` 索引。 |
 
 已有维护类参数也参与本轮测试组合：
@@ -48,7 +47,7 @@
 - **MERGE / RETURNING old-new**：覆盖 PostgreSQL 18 DML 返回 old/new 行版本的路径。
 - **COPY**：同时覆盖 libpq copy 协议和 SQL `COPY TO STDOUT` 变体，支持物化视图 `COPY`。
 - **EXPLAIN**：覆盖 PostgreSQL 18 新增 explain 选项组合。
-- **系统函数**：`--pg18-functions` 覆盖 PostgreSQL 18 新函数；`grammar.sql` 额外增加了跨版本可用的系统函数和系统视图查询。
+- **系统函数**：复用 `grammar.sql`，由 `--grammar-sql` 和 `--grammar-file` 控制；PG18 专属查询在 grammar 行尾使用 `-- pg18` 标记，低版本自动跳过。
 - **GiST 索引**：只在适合 GiST opclass 的类型上尝试建索引，避免对任意列硬建导致高频语法失败。
 
 ## 环境注意事项
@@ -85,7 +84,7 @@
   --pg18-partition-ops=10 \
   --pg18-copy=10 \
   --pg18-explain=10 \
-  --pg18-functions=10 \
+  --grammar-sql=20 \
   --gist-index=8 \
   --vacuum=6 \
   --vacuum-full=2 \

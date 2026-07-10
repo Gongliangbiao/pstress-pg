@@ -17,7 +17,7 @@ class Pg18ExplainStaticTest(unittest.TestCase):
         self.assertIn("PG18_EXPLAIN", self.common)
         self.assertIn('"pg18-explain"', self.help)
         self.assertIn("MEMORY, SERIALIZE, or WAL", self.help)
-        self.assertIn("returning-old-new|pg18-merge|pg18-copy|pg18-explain|pg18-functions",
+        self.assertIn("returning-old-new|pg18-merge|pg18-copy|pg18-explain",
                       self.randomizer)
 
     def test_pg18_explain_is_version_gated_and_dispatched(self):

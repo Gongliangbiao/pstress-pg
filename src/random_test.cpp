@@ -1149,7 +1149,6 @@ int sum_of_all_options(Thd1 *thd) {
     options->at(Option::PG18_MERGE)->setInt(0);
     options->at(Option::PG18_PARTITION_OPS)->setInt(0);
     options->at(Option::PG18_EXPLAIN)->setInt(0);
-    options->at(Option::PG18_FUNCTIONS)->setInt(0);
   }
 
   auto lock = opt_string(LOCK);
@@ -6217,6 +6216,10 @@ static std::vector<std::string> load_grammar_sql_from() {
 }
 
 /* return preformatted sql */
+static bool pg18_only_grammar_sql(const std::string &sql) {
+  return sql.find("-- pg18") != std::string::npos;
+}
+
 static void grammar_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
 
   static std::vector<std::string> all_sql = load_grammar_sql_from();
@@ -6233,7 +6236,18 @@ static void grammar_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
     std::vector<std::string> varchar_col;
   };
 
-  auto sql = all_sql[rand_int(all_sql.size() - 1)];
+  std::string sql;
+  for (size_t i = 0; i < all_sql.size(); ++i) {
+    sql = all_sql[rand_int(all_sql.size() - 1)];
+    if (pg18_only_grammar_sql(sql) && !pg_server_at_least(thd, 18)) {
+      sql.clear();
+      continue;
+    }
+    break;
+  }
+
+  if (sql.empty())
+    return;
 
   /* parse SQL in table */
   std::vector<std::vector<int>> sql_tables;
@@ -6343,38 +6357,6 @@ static void grammar_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
     execute_sql(sql, thd);
   } else
     std::cout << "NOT ABLE TO FIND any SQL in special SQL" << std::endl;
-}
-
-static void pg18_functions(Thd1 *thd) {
-  if (!pg_server_at_least(thd, 18))
-    return;
-
-  static const std::vector<std::string> sqls = {
-      "SELECT uuidv7(), uuidv4()",
-      "SELECT array_sort(ARRAY[3, 1, 2]), array_reverse(ARRAY[1, 2, 3])",
-      "SELECT reverse('\\\\x123456'::bytea)",
-      "SELECT casefold(U&'Stra\\00DFe')",
-      "SELECT crc32('postgres'::bytea), crc32c('postgres'::bytea)",
-      "SELECT gamma(5.0), lgamma(5.0)",
-      "SELECT jsonb_strip_nulls('{\"a\": null, \"b\": [1, null], "
-      "\"c\": {\"d\": null}}'::jsonb, true)",
-      "SELECT EXTRACT(WEEK FROM TIMESTAMP '2026-01-05')",
-      "SELECT backend_type, object, context, reads, read_bytes, writes, "
-      "write_bytes FROM pg_stat_get_backend_io(pg_backend_pid()) LIMIT 8",
-      "SELECT wal_records, wal_fpi, wal_bytes FROM "
-      "pg_stat_get_backend_wal(pg_backend_pid())",
-      "SELECT pid, io_id, state, operation FROM pg_get_aios() LIMIT 8",
-      "SELECT module_name, version FROM pg_get_loaded_modules() LIMIT 8",
-      "SELECT type, name FROM pg_get_wait_events() LIMIT 16",
-      "SELECT * FROM pg_get_wal_summarizer_state()",
-      "SELECT name, level, total_bytes, used_bytes FROM "
-      "pg_backend_memory_contexts LIMIT 16",
-      "SELECT backend_type, object, context, read_bytes, write_bytes, "
-      "extend_bytes FROM pg_stat_io LIMIT 16",
-      "SELECT num_done, restartpoints_done, slru_written FROM "
-      "pg_stat_checkpointer"};
-
-  execute_sql(sqls.at(rand_int(sqls.size() - 1)), thd);
 }
 
 static void pg18_explain(Table *table, Thd1 *thd) {
@@ -7573,9 +7555,6 @@ bool Thd1::run_some_query() {
       break;
     case Option::PG18_EXPLAIN:
       pg18_explain(table, this);
-      break;
-    case Option::PG18_FUNCTIONS:
-      pg18_functions(this);
       break;
 
     default:

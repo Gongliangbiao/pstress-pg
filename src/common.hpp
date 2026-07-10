@@ -154,7 +154,6 @@ struct Option {
     PG18_COPY_REJECT_LIMIT,
     PG18_COPY_LOG_VERBOSITY,
     PG18_EXPLAIN,
-    PG18_FUNCTIONS,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)
