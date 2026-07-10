@@ -1140,6 +1140,7 @@ int sum_of_all_options(Thd1 *thd) {
   if (!pg_server_at_least(thd, 18)) {
     options->at(Option::PG18_VACUUM_ANALYZE_ONLY)->setInt(0);
     options->at(Option::RETURNING_OLD_NEW)->setInt(0);
+    options->at(Option::PG18_NOT_NULL_CONSTRAINT)->setInt(0);
     options->at(Option::PG18_COPY)->setInt(0);
     options->at(Option::PG18_EXPLAIN)->setInt(0);
     options->at(Option::PG18_FUNCTIONS)->setInt(0);
@@ -6360,6 +6361,117 @@ static std::string pick_pg_matview_name(Thd1 *thd) {
   return name;
 }
 
+static bool pick_pg18_not_null_constraint(Thd1 *thd,
+                                          std::string &table_name,
+                                          std::string &constraint_name) {
+  PGresult *result = PQexec(
+      thd->conn,
+      "SELECT r.relname, c.conname "
+      "FROM pg_constraint c "
+      "JOIN pg_class r ON r.oid = c.conrelid "
+      "JOIN pg_namespace n ON n.oid = r.relnamespace "
+      "WHERE n.nspname = current_schema() "
+      "AND c.contype = 'n' "
+      "AND c.conname LIKE 'nn_pstress_%' "
+      "ORDER BY random() LIMIT 1");
+  if (result == nullptr || PQresultStatus(result) != PGRES_TUPLES_OK ||
+      PQntuples(result) == 0) {
+    if (result != nullptr)
+      PQclear(result);
+    return false;
+  }
+
+  table_name = PQgetvalue(result, 0, 0);
+  constraint_name = PQgetvalue(result, 0, 1);
+  PQclear(result);
+  return true;
+}
+
+static bool pg18_column_has_not_null_constraint(Thd1 *thd,
+                                                const std::string &table_name,
+                                                const std::string &column_name) {
+  auto sql = "SELECT 1 "
+             "FROM pg_constraint c "
+             "JOIN pg_class r ON r.oid = c.conrelid "
+             "JOIN pg_namespace n ON n.oid = r.relnamespace "
+             "JOIN pg_attribute a ON a.attrelid = c.conrelid "
+             "AND a.attnum = ANY(c.conkey) "
+             "WHERE n.nspname = current_schema() "
+             "AND c.contype = 'n' "
+             "AND r.relname = '" +
+             table_name + "' "
+             "AND a.attname = '" +
+             column_name + "' LIMIT 1";
+  PGresult *result = PQexec(thd->conn, sql.c_str());
+  bool found = result != nullptr && PQresultStatus(result) == PGRES_TUPLES_OK &&
+               PQntuples(result) > 0;
+  if (result != nullptr)
+    PQclear(result);
+  return found;
+}
+
+static void pg18_not_null_constraint(Table *table, Thd1 *thd) {
+  if (!pg_server_at_least(thd, 18) || table == nullptr)
+    return;
+
+  std::string table_name;
+  std::string constraint_name;
+  auto action = rand_int(3);
+  if (action != 0 &&
+      pick_pg18_not_null_constraint(thd, table_name, constraint_name)) {
+    if (action == 1) {
+      execute_sql("ALTER TABLE " + table_name + " VALIDATE CONSTRAINT " +
+                      constraint_name,
+                  thd);
+    } else if (action == 2) {
+      auto inherit = rand_int(1) == 0 ? " INHERIT" : " NO INHERIT";
+      execute_sql("ALTER TABLE " + table_name + " ALTER CONSTRAINT " +
+                      constraint_name + inherit,
+                  thd);
+    } else {
+      execute_sql("ALTER TABLE " + table_name + " DROP CONSTRAINT " +
+                      constraint_name,
+                  thd);
+    }
+    return;
+  }
+
+  if (table->type == Table::PARTITION)
+    return;
+
+  table->table_mutex.lock();
+  if (table->columns_->empty()) {
+    table->table_mutex.unlock();
+    return;
+  }
+
+  std::vector<Column *> candidates;
+  for (auto *column : *table->columns_) {
+    if (column->type_ != Column::GENERATED && !column->null &&
+        !column->primary_key && !column->auto_increment)
+      candidates.push_back(column);
+  }
+  if (candidates.empty()) {
+    table->table_mutex.unlock();
+    return;
+  }
+
+  auto target = table->type == Table::PARTITION ? pg_partition_target(table)
+                                                : table->name_;
+  auto column_name = candidates.at(rand_int(candidates.size() - 1))->name_;
+  table->table_mutex.unlock();
+
+  if (pg18_column_has_not_null_constraint(thd, target, column_name))
+    return;
+
+  constraint_name = "nn_pstress_" + std::to_string(thd->thread_id) + "_" +
+                    std::to_string(rand_int(1000000, 1));
+  auto sql = "ALTER TABLE " + target + " ADD CONSTRAINT " + constraint_name +
+             " NOT NULL " + column_name + " NOT VALID";
+
+  execute_sql(sql, thd);
+}
+
 static std::string pg18_copy_base_source(Table *table,
                                          int partition_child_probability = 10) {
   if (table == nullptr)
@@ -7100,6 +7212,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::PREPARED_TRANSACTION_STRESS:
       prepared_tx_stress(table, this);
+      break;
+    case Option::PG18_NOT_NULL_CONSTRAINT:
+      pg18_not_null_constraint(table, this);
       break;
     case Option::PG18_COPY:
       pg18_copy(table, this);
